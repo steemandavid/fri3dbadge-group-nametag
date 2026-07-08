@@ -1,0 +1,18 @@
+{
+  "name": "Group Nametag",
+  "publisher": "Fri3d Camp",
+  "short_description": "Animated group nametag + BLE proximity finder",
+  "long_description": "Shows your group logo and name, and quietly alerts you when someone from one of your groups comes within Bluetooth range. Generic: any group sets its own name(s), member, and logo by editing config.json and replacing logo.png.",
+  "fullname": "com.fri3dcamp.groupnametag",
+  "version": "0.1.0",
+  "category": "utilities",
+  "activities": [
+    {
+      "entrypoint": "group_nametag.py",
+      "classname": "GroupNametag",
+      "intent_filters": [
+        { "action": "main", "category": "launcher" }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,12 @@
+# Python / MicroPython
+__pycache__/
+*.pyc
+*.mpy
+.pytest_cache/
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+*~
+*.swp
