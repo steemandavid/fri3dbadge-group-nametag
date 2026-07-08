@@ -1,3 +1,27 @@
+# Group Nametag + Proximity Finder — published to GitHub + privacy scrub — 2026-07-08
+
+- Published the project as a **public** GitHub repo under the owner's account
+  (`fri3dbadge-group-nametag`), initial commit + push.
+- **Sensitive-info audit** of all tracked files: clean — no emails, passwords, API
+  keys/tokens (the GitHub PAT used for the push was never written to any file), IPs,
+  WiFi creds, host paths, or real names/phones. Image metadata is benign (only an
+  editor version + DPI); generated PNGs are fully stripped.
+- **Privacy scrub + history rewrite**: removed the maintainer's personal name and
+  callsign from all file contents (→ generic `Alex`/`YOURCALL` examples; `config.json`
+  is now a `Your Name`/`YOURCALL` template) and from the commit author/committer
+  identity. Because the repo was already public, this was done as a commit **amend +
+  force-push** (`dc50c10` → `9611146`) so the names leave `main`'s history, not just
+  the tip. `git grep` against the remote tree confirms `main` is clean.
+  - Caveat: the orphaned commit may remain reachable by SHA / in caches for a time;
+    delete-and-recreate the repo for a guaranteed purge.
+  - Still in the repo (outside the name+callsign scrub scope, flagged for the owner):
+    the makerspace group name (17×), its logo image, and badge MAC addresses (3×).
+- **Phase 0–4 code review** (`Code_Review_Phase0-4_20260708_0800.md`): independent
+  review verdict **PASS WITH NOTES** — no critical defects; the scan-stability fix and
+  platform adaptation endorsed.
+
+---
+
 # Group Nametag + Proximity Finder — SCAN STABILITY FIX — 2026-07-07
 
 Fixed the **presence flapping** the user observed with 3 co-located badges (each
