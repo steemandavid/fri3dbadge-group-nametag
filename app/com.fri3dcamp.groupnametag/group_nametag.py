@@ -43,6 +43,18 @@ BANNER_MS = 2500
 DIM_MS = 30000           # backlight idle dim
 TICK_MS = 30
 
+# Name label: rendered at font_montserrat_28 (the largest built-in font) then
+# scaled 1.5x via an lvgl transform (256 == 1.0x) so it reads big at the top.
+NAME_SCALE = 384         # 384/256 = 1.5x
+NAME_TOP = 6             # y of the (scaled) name at the top of the screen
+
+# Logo fit-to-box (PLAN §7): the source image is scaled to fit this box so an
+# arbitrary group logo neither overlaps the name nor overflows the 296x240 screen.
+# Sits below the enlarged name (which now occupies the top band).
+LOGO_BOX_W = 180
+LOGO_BOX_H = 74
+LOGO_TOP = 74            # y of the fitted logo's top (below the big name)
+
 # Button GPIOs (Fri3d 2024 badge; pull-up, value()==0 == pressed)
 BTN = {"start": 0, "x": 38, "a": 39, "b": 40, "y": 41, "menu": 45}
 
@@ -99,6 +111,8 @@ class GroupNametag(Activity):
         self._banner = None
         self._banner_bg = None
         self._banner_until = 0
+        self._alert_names = []        # arrivals accumulated across the current banner window
+        self._finishing = False       # set when START/B requests exit -> loop breaks cleanly
         self._buzzer = None
         self._disp = None
         self._dimmed = False
@@ -205,14 +219,68 @@ class GroupNametag(Activity):
             self._disp = None              # API absent -> disable dim feature
 
     # ------------------------------------------------------------------ logo
+    def _read_png_size(self, path):
+        # Read (w, h) straight from the PNG IHDR — deterministic, and independent
+        # of when lvgl actually decodes the image.
+        try:
+            with open(path, "rb") as f:
+                hdr = f.read(24)
+            if len(hdr) >= 24 and hdr[:8] == b"\x89PNG\r\n\x1a\n":
+                import struct
+                w, h = struct.unpack(">II", hdr[16:24])
+                if w > 0 and h > 0:
+                    return w, h
+        except Exception:
+            pass
+        return None
+
+    def _logo_file_ok(self, path):
+        # Exists and non-empty. lvgl decodes silently and won't raise on a
+        # missing/empty file (verified on-device), so gate on the file itself.
+        try:
+            return os.stat(path)[6] > 0     # st_size
+        except Exception:
+            return False
+
     def _place_logo(self, scr):
+        logo_path = APP_DIR + "/logo.png"
+        size = self._read_png_size(logo_path)
+        # Deterministic decode-viability gate (D-12): a missing / empty /
+        # non-PNG file would otherwise decode to nothing *without* raising,
+        # leaving a blank space. Fall back to the drawn placeholder instead.
+        if size is None and not self._logo_file_ok(logo_path):
+            self._logo_im = self._placeholder_logo(scr)
+            return
         try:
             self._logo_im = lv.image(scr)
-            self._logo_im.set_src("S:" + APP_DIR + "/logo.png")
+            self._logo_im.set_src("S:" + logo_path)
         except Exception:
             self._logo_im = self._placeholder_logo(scr)
-        # fit into a centered upper box; centre so breathing scales in place
-        self._logo_im.align(lv.ALIGN.TOP_MID, 0, 18)
+            return
+        if size:
+            w, h = size
+            # scale = min(box_w/img_w, box_h/img_h) x 256 (PLAN §7)
+            base = int(min(LOGO_BOX_W / w, LOGO_BOX_H / h) * 256)
+            if base < 32:
+                base = 32
+            self._logo_base_scale = base
+            fitted_h = h * base // 256
+            try:
+                self._logo_im.set_pivot(w // 2, h // 2)   # scale about the image centre
+            except Exception:
+                pass
+            # With a centre pivot the object box is still w*h; offset so the
+            # *scaled* image's top lands at LOGO_TOP, clear of the name label.
+            y_off = LOGO_TOP - (h - fitted_h) // 2
+            self._logo_im.align(lv.ALIGN.TOP_MID, 0, y_off)
+            try:
+                self._logo_im.set_scale(base)
+            except Exception:
+                pass
+        else:
+            # Unknown dimensions (non-PNG / unreadable) — keep native scale.
+            self._logo_base_scale = 256
+            self._logo_im.align(lv.ALIGN.TOP_MID, 0, LOGO_TOP)
 
     def _placeholder_logo(self, scr):
         # Runtime fallback if logo.png is missing/broken: a coloured disc + tag.
@@ -222,7 +290,7 @@ class GroupNametag(Activity):
         obj.set_style_bg_color(lv.color_hex(0x2A6F4F), 0)
         obj.set_style_bg_opa(lv.OPA.COVER, 0)
         obj.set_style_radius(50, 0)
-        obj.align(lv.ALIGN.TOP_MID, 0, 30)
+        obj.align(lv.ALIGN.TOP_MID, 0, LOGO_TOP)
         lbl = lv.label(obj)
         lbl.set_text("HS")
         lbl.set_style_text_color(lv.color_hex(0xFFFFFF), 0)
@@ -249,32 +317,42 @@ class GroupNametag(Activity):
                         font=lv.font_montserrat_14, center=True)
             return
 
+        # Name: big (font 28 x 1.5 transform) at the very top of the screen.
+        self._name_lbl = self._label(scr, 0, NAME_TOP, cfg["name"], COL_NAME,
+                                     font=lv.font_montserrat_28, center=True)
+        try:
+            # Scale about the label's horizontal centre so it stays centred and
+            # grows downward (full-width label -> centre x is the screen centre).
+            self._name_lbl.set_style_transform_pivot_x(W // 2, 0)
+            self._name_lbl.set_style_transform_pivot_y(0, 0)
+            self._name_lbl.set_style_transform_scale(NAME_SCALE, 0)
+        except Exception:
+            pass
+
         self._place_logo(scr)
 
-        self._name_lbl = self._label(scr, 0, 130, cfg["name"], COL_NAME,
-                                     font=lv.font_montserrat_28, center=True)
         if cfg["handle"]:
-            self._handle_lbl = self._label(scr, 0, 162, cfg["handle"], COL_HANDLE,
+            self._handle_lbl = self._label(scr, 0, 52, cfg["handle"], COL_HANDLE,
                                            font=lv.font_montserrat_16, center=True)
         else:
             self._handle_lbl = None
 
-        # own groups (top-left), battery (top-right)
+        # own groups (below the logo), battery (top-right corner)
         own = ", ".join(cfg["groups"])[:34]
-        self._own_lbl = self._label(scr, 6, 6, own, COL_OWN,
-                                    font=lv.font_montserrat_14)
-        self._batt_lbl = self._label(scr, W - 70, 6, "--%", COL_BATT,
+        self._own_lbl = self._label(scr, 0, 150, own, COL_OWN,
+                                    font=lv.font_montserrat_14, center=True)
+        self._batt_lbl = self._label(scr, W - 46, 8, "--%", COL_BATT,
                                      font=lv.font_montserrat_14)
 
         # nearby line (bottom) + detail list
         self._near_lbl = self._label(scr, 0, H - 34, "scanning...", COL_NONE,
                                      font=lv.font_montserrat_14, center=True)
-        self._detail_lbl = self._label(scr, 4, 190, "", COL_NEAR,
+        self._detail_lbl = self._label(scr, 4, 172, "", COL_NEAR,
                                        font=lv.font_montserrat_12)
         self._detail_lbl.add_flag(lv.obj.FLAG.HIDDEN)
 
         # help line
-        self._label(scr, 0, H - 16, "A:detail  X:mute  START:exit", COL_NONE,
+        self._label(scr, 0, H - 16, "A:detail  X:mute  B/START:exit", COL_NONE,
                     font=lv.font_montserrat_12, center=True)
 
         # alert banner (hidden by default)
@@ -339,7 +417,8 @@ class GroupNametag(Activity):
         if not arrivals:
             return
         # signature = lowest shared id among the arrivals (both badges agree)
-        lowest = min(a["shared_id"] for a in arrivals if a["shared_id"] is not None)
+        ids = [a["shared_id"] for a in arrivals if a["shared_id"] is not None]
+        lowest = min(ids) if ids else 0
         hue, freq = _sig_from_id(lowest)
         r, g, b = _hsv(hue)
         self._flash_leds(r, g, b)
@@ -431,25 +510,28 @@ class GroupNametag(Activity):
     # ------------------------------------------------------------------ main loop
     async def _loop(self):
         last = time.ticks_ms()
-        try:
-            while True:
+        while True:
+            # Per-frame isolation: a transient error skips one frame instead of
+            # killing the loop (which would freeze the UI and all buttons).
+            try:
                 now = time.ticks_ms()
                 dt = time.ticks_diff(now, last)
                 last = now
 
                 self._handle_buttons()
+                if self._finishing:
+                    break
                 self._ble.tick(now, dt)
                 self._drain_arrivals()
                 self._refresh_nearby()
                 self._refresh_battery(now)
                 self._animate(now)
                 self._tick_dim(now)
-
-                await asyncio.sleep_ms(TICK_MS)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            pass
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                pass
+            await asyncio.sleep_ms(TICK_MS)
 
     def _handle_buttons(self):
         for name in ("a", "x", "start", "b", "y", "menu"):
@@ -467,7 +549,10 @@ class GroupNametag(Activity):
                         self._detail_lbl.remove_flag(lv.obj.FLAG.HIDDEN)
                     else:
                         self._detail_lbl.add_flag(lv.obj.FLAG.HIDDEN)
-            elif ev == "start":
+            elif ev == "start" or ev == "b":
+                # B / START -> return to the launcher (PLAN §8). Flag so the loop
+                # breaks before touching widgets finish() may have torn down.
+                self._finishing = True
                 self.finish()
                 return
 
@@ -475,8 +560,22 @@ class GroupNametag(Activity):
         if self._unconfigured:
             return
         arrivals = self._ble.take_arrivals()
-        if arrivals:
-            self._fire_alert(arrivals)
+        if not arrivals:
+            return
+        now = time.ticks_ms()
+        # Coalesce across the whole banner window (PLAN §8): the first arrival
+        # fires one cue (banner + LED + sting); further arrivals while the banner
+        # is still up only extend the banner text — no extra sting/flash.
+        banner_active = self._banner_until and time.ticks_diff(now, self._banner_until) < 0
+        if banner_active:
+            self._alert_names.extend(arrivals)
+            try:
+                self._banner.set_text(self._coalesced_text(self._alert_names))
+            except Exception:
+                pass
+        else:
+            self._alert_names = list(arrivals)
+            self._fire_alert(self._alert_names)
 
     def _refresh_nearby(self):
         if self._unconfigured or self._near_lbl is None:
@@ -500,7 +599,7 @@ class GroupNametag(Activity):
         if self._logo_im is not None and not self._unconfigured:
             t = time.ticks_diff(now, self._t0)
             phase = (t % BREATH_PERIOD_MS) / BREATH_PERIOD_MS
-            s = int(256 + BREATH_AMP * math.sin(phase * 2 * math.pi))
+            s = int(self._logo_base_scale + BREATH_AMP * math.sin(phase * 2 * math.pi))
             try:
                 self._logo_im.set_scale(s)
             except Exception:
@@ -520,9 +619,10 @@ class GroupNametag(Activity):
 
     # ------------------------------------------------------------------ battery
     def _refresh_battery(self, now):
-        if self._batt_lbl is None or now < self._batt_next_ms:
+        # ticks_diff is wrap-safe (PLAN §6.3) — never compare raw ticks_ms values.
+        if self._batt_lbl is None or time.ticks_diff(now, self._batt_next_ms) < 0:
             return
-        self._batt_next_ms = now + 5000
+        self._batt_next_ms = time.ticks_add(now, 5000)
         try:
             self._batt_lbl.set_text(self._battery_text())
         except Exception:

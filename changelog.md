@@ -1,3 +1,74 @@
+# Group Nametag + Proximity Finder — review-fix implementation, on-device test, UI tweaks — 2026-07-08
+
+Implemented the fixes from the Phase 0–4 code review, completed the DESIGN.md doc
+TODOs, ran the full on-device test suite on 3 badges, and made a couple of UI
+tweaks. Fixes/results captured in `Code_Review_Fixes_20260708.md`.
+
+## Code-review fixes (`ble_proximity.py`, `group_nametag.py`, `config.json`)
+All findings from `Code_Review_Phase0-4_20260708_0800.md`:
+- **D-1** UI loop `try/except` moved *inside* the `while` (a per-frame error no
+  longer permanently freezes the render/input loop); added a `_finishing` flag so
+  `B`/`START` breaks the loop before touching torn-down widgets.
+- **D-2** BLE scan IRQ↔loop race on `_seen`: the IRQ now only enqueues raw results
+  into a bounded `_pending` list; all parse/intersect/`_seen` mutation moved to
+  `_process_pending()`/`_process_result()` on the loop thread (also fixes **D-9**).
+- **D-3** logo now scaled-to-fit (`_read_png_size` + fit-to-box); `_logo_base_scale`
+  is live; **D-4** alert coalescing accumulates across the banner window (one cue).
+- **D-5** `B` exits like `START`; **D-6** shipped `config.json` is now an empty
+  template (fresh badge shows the hint + stays BLE-silent); **D-7** wrap-safe
+  `ticks_diff`/`ticks_add` in the scan re-arm + battery throttles; **D-8** `begin()`
+  coerces name/handle to str and returns truthful advertise success.
+- **D-12** (was deferred) logo placeholder now shown for a missing/empty/non-PNG
+  file via a deterministic file gate — confirmed on-device that lvgl fails silently
+  (no exception) and `image_decoder_get_info` is not exposed on this build.
+- Bonus: `_process_result` now refreshes a re-seen peer's **name** (a rename was
+  previously invisible for up to the 30 s eviction window).
+- Host `pytest tests/` stays **30/30**; added a host-level exercise of the
+  refactored radio wrapper (deferred IRQ→tick, notify-once, eviction, disjoint, etc.).
+
+## DESIGN.md doc TODOs completed
+- **§5** filled in: the `rssi_floor` dBm→range guidance table (−120 full-range …
+  −70 next-to-me) and the open-field link-budget estimate (Friis ≈93 dB budget →
+  ~435 m ideal LoS, derated to a realistic ~50–100 m LoS / ~10–30 m through
+  bodies/tents).
+- **§4** re-verification note added after the on-device run.
+
+## On-device full test — 3 badges (ACM0/1/2), no badge wedged
+Deployed the fixed code with **`mpremote fs cp`**, launched via
+`AppManager.start_app` in **paste mode**, verified with a **passive host BLE scan**
+(`bleak`) plus **lvgl label introspection** — deliberately avoiding the REPL BLE
+begin/end cycling that wedged badges in a prior session. All passed:
+- Single + 3-badge concurrent advertise (HSNT payload correct: `ver 1`, `gid 0xa07b`).
+- Real multi-peer round-trip detection; **coalesced** banner for two arrivals.
+- Disjoint group ignored; unconfigured → "Configure me" hint **and absent from the
+  air**; advertising **stops on exit** (`restart_launcher`); detail view content
+  (name · shared group · smoothed RSSI · age); live battery/own-group/help UI.
+
+Method gotchas (for next time):
+- Paste-based file upload **hangs on large files** (paste-mode echo never goes
+  quiet) → use `mpremote fs cp` for transfers; paste mode only for launch/read.
+- `mpos.get_foreground_app()` returns the **fullname string**, not the instance;
+  the live Activity is `activity_navigator.screen_stack[i][0]`.
+- Avoid `mpos.capture_screenshot()` from paste (deadlocks lvgl) — read UI via
+  `screen_active()` label-walking or `mpos.get_all_widgets_with_text`.
+
+## UI tweaks (`group_nametag.py`)
+- **Name enlarged 1.5×** and **moved to the top**: rendered at `font_montserrat_28`
+  (the largest built-in) then `transform_scale(384)` (=1.5×) pivoted on the label's
+  horizontal centre so it stays centred; `NAME_TOP=6`. Logo relocated below it
+  (`LOGO_TOP 14→74`, `LOGO_BOX_H 104→74`); own-group line moved under the logo.
+- Removed the callsign handle from the reference config; updated the on-badge peer
+  display names.
+
+## Privacy note
+The on-device test output re-introduced the maintainer's real name + callsign into
+`DESIGN.md` and `Code_Review_Fixes_20260708.md`. Since the GitHub repo is **public**
+and was previously scrubbed of that identity, these were re-scrubbed to the same
+generic `Alex`/`YOURCALL` before commit. (The makerspace group name and badge MACs
+remain in-repo — still flagged for the owner to decide, unchanged this session.)
+
+---
+
 # Group Nametag + Proximity Finder — published to GitHub + privacy scrub — 2026-07-08
 
 - Published the project as a **public** GitHub repo under the owner's account

@@ -130,14 +130,69 @@ The host-as-2nd-badge path uses `tools/host_advertise.py` (BlueZ D-Bus
 `LEAdvertisement1`, broadcast type, company `0xFFFF`). It registers cleanly; if
 your BlueZ/`btmon` setup confirms TX, it completes the physical round-trip.
 
-## 5. Open items / TODO
+### Re-verification after the code-review fixes (2026-07-08)
 
-- **rssi_floor guidance table** (PLAN §6.3) — coarse dBm→range mapping for the
-  README (−120 ≈ full range; −80 ≈ same tent/~10 m; −70 ≈ next to me). Treat as a
-  *range gate*, not calibration.
-- **Open-field link budget** write-up (≈ 50–100 m LoS badge-to-badge, less
-  through tents/bodies) — defer to a field measurement.
-- Confirm live launcher navigation + that advertising **stops** on exit (phone
-  scanner) in a real session.
+The post-review fixes (see `Code_Review_Fixes_20260708.md`) were re-verified on the
+same 3 badges (Alex/ACM0, Alice/ACM1, Bob/ACM2). Method: deploy with `mpremote fs
+cp`, launch via `AppManager.start_app` in paste mode, and observe with a **passive**
+host BLE scan plus lvgl label introspection (`mpos.get_all_widgets_with_text` /
+walking `screen_active()`), instead of the REPL BLE begin/end cycling that wedged
+badges previously — **no badge wedged this round.** Confirmed: 3-badge concurrent
+advertise+scan, real multi-peer round-trip (`nearby: Alice, Bob`), coalesced banner,
+disjoint-ignored, unconfigured→hint+BLE-silent, advertising stops on exit, detail
+view content, and battery/own-group/help-line UI. The **long-session ghost check**
+(the ⚠️ above) remains the one open item — addresses are still stable public MACs,
+but a multi-minute soak wasn't run to keep the session short and avoid stressing the
+NimBLE/USB stack.
+
+## 5. `rssi_floor` guidance & open-field link budget
+
+`rssi_floor` (per-install `config.json`, PLAN §5/§6.3) is a **coarse range gate,
+not calibration** — it drops adverts whose received RSSI is below the threshold
+*before* they reach the proximity state machine. It trades precise distance
+control for zero on-site setup; RSSI varies with orientation, bodies, tents and
+multipath, so treat these as order-of-magnitude, not metered, distances.
+
+### 5.1 Guidance table
+
+| `rssi_floor` | Effect | Rough open-field range that passes | Use when |
+|---|---|---|---|
+| `-120` (default) | **Disabled** — every packet the radio can decode passes | Full range: ~50–100 m LoS, less through crowds/tents | "Who from my groups is anywhere around?" (camp-wide) — the default. |
+| `-90` | Light gate — rejects only the weakest fringe packets | ~30–50 m | Trim the far fringe while staying area-wide. |
+| `-80` | Moderate gate | ~same tent / ~10 m | "Who's in my immediate area / same tent?" |
+| `-70` | Tight gate | ~a few metres | "Who's right next to me?" (badge-tap-range demos). |
+| `-60` and up | Very tight | ~touching / <1 m | Deliberate close-proximity only; will miss most real encounters. |
+
+Notes:
+- The ESP32-S3 receiver sensitivity floor is **≈ −97 dBm**, so anything below
+  about −97 is never decodable anyway — `-120` is simply "no gate."
+- RSSI is still smoothed into `rssi_ewma` and shown in the `A` detail view for
+  information/tuning regardless of the floor.
+- Raise the floor gradually: −120 → −90 → −80 and watch the detail view's dBm
+  column for your actual peers before committing to a tighter value.
+
+### 5.2 Open-field link budget (estimate)
+
+Back-of-envelope for two badges, BLE legacy advertising on 2.4 GHz:
+
+- **TX power:** ESP32-S3 default ≈ **0 dBm** (NimBLE default; not raised by this app).
+- **Antenna gain:** PCB chip antenna ≈ **−2 dBi** effective each end (conservative,
+  body-detuned on a worn badge).
+- **RX sensitivity:** ≈ **−97 dBm** (coded-PHY not used; legacy 1M PHY).
+- **Free-space path loss** (Friis) at 2.44 GHz: `FSPL(dB) ≈ 40.2 + 20·log10(d_m)`.
+
+Allowable path loss = `TX − RX_sens + gains` ≈ `0 − (−97) + (−2 −2)` ≈ **93 dB**.
+Solving `93 = 40.2 + 20·log10(d)` → `log10(d) ≈ 2.64` → **d ≈ 435 m** ideal LoS.
+Real-world derating for a worn badge (body shadowing −10…−20 dB, fade/multipath
+margin −10 dB, 2.4 GHz crowd/Wi-Fi congestion at a camp) pulls this down by
+20–40 dB, i.e. to a **realistic ~50–100 m line-of-sight, dropping to ~10–30 m
+through tents/bodies/crowds** — matching the "presence = in BLE range ≈ same
+area" design intent (§3, PLAN §6.3). Bodies between two badges (the wearer's own
+torso included) are the dominant real loss; expect worse when the peer is behind
+you. **These are estimates — a field measurement would refine them; the design
+does not depend on the exact number, only on "roughly same area."**
+
+## 6. Remaining out-of-scope items (PLAN §11)
+
 - Animated-GIF logos / scan-response name extension / persisted mute remain out
-  of scope (PLAN §11).
+  of scope.

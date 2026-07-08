@@ -278,6 +278,7 @@ class BLEProximity:
         self._rssi_floor = RSSI_FLOOR_DEFAULT
         self._seen = {}               # key (addr_type, addr_bytes) -> dict
         self._arrivals = []           # queued new-arrival events for UI
+        self._pending = []            # raw scan results captured in the IRQ, drained in tick()
         self._adv = None              # current adv payload
         self._next_rearm_ms = 0       # ticks_ms deadline to restart the continuous scan
         self._irq_scan_result = 5     # bluetooth._IRQ_SCAN_RESULT (seeded in begin)
@@ -289,7 +290,10 @@ class BLEProximity:
         from bluetooth import BLE
         self._own_ids, _ = hash_groups(groups)
         self._own_table = build_own_table(groups)
-        self._name = name if name else ""
+        # Coerce identity fields to str so a non-string config value degrades
+        # instead of crashing begin() in build_payload/truncate_utf8.
+        self._name = name if isinstance(name, str) else ""
+        handle = handle if isinstance(handle, str) else ""
         self._rssi_floor = self._validate_floor(rssi_floor)
         self._irq_scan_result = getattr(bluetooth, "_IRQ_SCAN_RESULT", 5)
 
@@ -303,13 +307,14 @@ class BLEProximity:
         # Stable public address is the default on this build (verified
         # ble.config("mac") -> (0, ...)); no addr_mode change needed.
         self._ble.irq(self._irq)
+        adv_ok = True
         try:
             self._ble.gap_advertise(ADV_MS * 1000, adv_data=self._adv, connectable=False)
         except Exception:
-            pass
+            adv_ok = False        # scanning-but-invisible; report it to the caller
         self._next_rearm_ms = 0       # start the continuous scan on the first tick()
         self._active = True
-        return True
+        return adv_ok
 
     def end(self):
         if not self._ble:
@@ -330,36 +335,55 @@ class BLEProximity:
         self._ble = None
         self._seen = {}
         self._arrivals = []
+        self._pending = []
 
     # ---- continuous dense scan (called from UI loop each frame) ----
     def tick(self, now_ms, dt_ms):
         if not self._active or not self._ble:
             return
+        from time import ticks_diff, ticks_add
+        # Drain scan results captured by the IRQ and update the peer table on
+        # THIS (loop) thread, so _seen is never mutated mid-iteration by the IRQ.
+        self._process_pending(now_ms)
         # Evict stale peers every frame (cheap).
         self._evict(now_ms)
         # Re-arm the continuous dense scan periodically (starts it on the first
-        # tick, and restarts it every SCAN_REARM_MS as insurance).
-        if now_ms >= self._next_rearm_ms:
+        # tick, and restarts it every SCAN_REARM_MS as insurance). ticks_diff is
+        # wrap-safe (PLAN §6.3) — never compare raw ticks_ms values.
+        if ticks_diff(now_ms, self._next_rearm_ms) >= 0:
             try:
                 self._ble.gap_scan(0, SCAN_INTERVAL_US, SCAN_WINDOW_US)
             except Exception:
                 pass
-            self._next_rearm_ms = now_ms + SCAN_REARM_MS
+            self._next_rearm_ms = ticks_add(now_ms, SCAN_REARM_MS)
 
-    # ---- IRQ: parse + intersect + update table ----
+    # ---- IRQ: capture only (no parsing / no _seen mutation here) ----
     def _irq(self, event, data):
         if event != self._irq_scan_result:
             return
         try:
-            self._handle_scan_result(data)
+            # On MicroPython NimBLE, _IRQ_SCAN_RESULT data layout:
+            #   (addr_type, addr, adv_type, rssi, adv_data)
+            addr_type, addr, adv_type, rssi, adv_data = data
+            # Copy the transient buffers (only valid during this callback) and
+            # queue for processing in tick(). Bound the queue so a stalled loop
+            # can't grow it without limit.
+            if len(self._pending) < 256:
+                self._pending.append((addr_type, bytes(addr), bytes(adv_data), rssi))
         except Exception:
             pass              # never let an IRQ raise
 
-    def _handle_scan_result(self, data):
-        # On MicroPython NimBLE, _IRQ_SCAN_RESULT data layout:
-        #   (addr_type, addr, adv_type, rssi, adv_data)
-        addr_type, addr, adv_type, rssi, adv_data = data
-        info = parse_payload(bytes(adv_data))
+    # ---- deferred processing (runs in tick(), on the loop thread) ----
+    def _process_pending(self, now):
+        if not self._pending:
+            return
+        pending = self._pending
+        self._pending = []            # atomic rebind; a concurrent IRQ append is safe
+        for addr_type, addr, adv_data, rssi in pending:
+            self._process_result(addr_type, addr, adv_data, rssi, now)
+
+    def _process_result(self, addr_type, addr, adv_data, rssi, now):
+        info = parse_payload(adv_data)
         if info is None:
             return
         shared = intersect(self._own_ids, info["group_ids"])
@@ -367,9 +391,7 @@ class BLEProximity:
             return                  # disjoint -> ignore
         if rssi < self._rssi_floor:
             return                  # below noise floor
-        from time import ticks_ms
-        key = (addr_type, bytes(addr))
-        now = ticks_ms()
+        key = (addr_type, addr)
         entry = self._seen.get(key)
         shared_id, shared_name = shared_name_for(self._own_table, info["group_ids"])
         is_new = entry is None
@@ -396,6 +418,7 @@ class BLEProximity:
             a = 0.3
             entry["rssi_ewma"] = (1 - a) * entry["rssi_ewma"] + a * rssi
             entry["rssi"] = rssi
+            entry["name"] = info["name"]     # refresh (peer may have been renamed)
             entry["shared_name"] = shared_name
             entry["shared_id"] = shared_id
 

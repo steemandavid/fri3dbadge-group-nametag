@@ -43,12 +43,13 @@ Edit **`/apps/com.fri3dcamp.groupnametag/config.json`**:
   other when their group lists **overlap** (any shared group). Each name is
   hashed before broadcast (never sent as text), so type it the same way on every
   member's badge (case/whitespace are ignored). Up to ~5 groups.
-- **`name`** — your display name (big, centre).
+- **`name`** — your display name (shown large across the top of the screen).
 - **`handle`** — optional second line (callsign / nickname); may be `""`.
 - **`rssi_floor`** — optional coarse range gate in dBm. Default **`-120`** =
   detect anything the radio can hear (full range). Raise it to only alert on
   badges that are close, e.g. `-80` (≈ same tent / ~10 m) or `-70` (≈ next to me).
-  It's a noise/range filter, *not* fine calibration.
+  It's a noise/range filter, *not* fine calibration. See **DESIGN.md §5** for a
+  fuller dBm→range guidance table and the open-field link-budget estimate.
 
 Then **replace `logo.png`** with your group's logo (PNG or JPEG; keep it ≲300×300
 and ≲150 KB; non-square is fine — it's auto-fit and centred). Reboot.
@@ -63,11 +64,12 @@ and ≲150 KB; non-square is fine — it's auto-fit and centred). Reboot.
 |---|---|
 | **A** | Toggle the nearby-list detail view (name · shared group · smoothed RSSI · age) |
 | **X** | Mute / unmute the alert buzzer |
-| **START** | Exit back to the launcher (the OS back gesture also works) |
+| **B** / **START** | Exit back to the launcher (the OS back gesture also works) |
 
-The idle screen shows: your logo (breathing), name + handle, your own group(s)
-(top-left) so you can confirm who can find you, battery % (top-right), and the
-current "nearby: …" line. On a new arrival, a banner appears for ~2.5 s, the LEDs
+The idle screen shows: your name large across the top, your logo (breathing)
+below it, your handle (if set), your own group(s) so you can confirm who can find
+you, battery % (top-right), and the current "nearby: …" line. On a new arrival, a
+banner appears for ~2.5 s, the LEDs
 flash, and a short buzzer sting plays — with a **colour + tone unique to the
 shared group** (derived from the group hash, so you can recognise *which* group
 just arrived without reading the screen). Several arrivals in one window
