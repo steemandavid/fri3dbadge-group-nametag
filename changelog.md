@@ -1,3 +1,52 @@
+# Group Nametag + Proximity Finder — screenshot-capture investigation — 2026-07-10
+
+Attempted to capture a still screenshot of the running app on a configured badge
+for documentation. No app/code changes; **findings only**, folded into `DESIGN.md`
+§1/§4.
+
+## `capture_screenshot()` is not usable for a full-frame capture on this build
+- `mpos.capture_screenshot('/data/shot.bin')` does **not** deadlock from raw REPL
+  (`mpremote run`/`exec`) — only from paste, where it deadlocks lvgl (DESIGN §1).
+  But the 153,600-byte file it writes (320×240×2 RGB565) is a **scrambled partial
+  lvgl draw buffer, not a composited frame**: brute-forcing the row stride from
+  120–512 yields **zero empty columns for every width** (no text columns or screen
+  margins ever line up), so no byte-order/stride/dimension reinterpretation
+  produces a readable image. lvgl `snapshot`/`snapshot_create` are **not compiled
+  in**, so there is no on-device path to a true pixel screenshot without a firmware
+  change (enable `LV_USE_SNAPSHOT`) or SPI panel-GRAM readback.
+- **Reliable alternative for "what's on screen":** `mpos.get_all_widgets_with_text(lv.screen_active())`
+  returns the label widgets; `w.get_text()` gives each label's text. `print_screen_labels(scr)`
+  takes the screen object as one positional arg. Used to confirm the live idle
+  screen (name, own-group, battery %, the `nearby:` line, the controls hint) and a
+  live arrival banner.
+
+## Other verified facts (for next time)
+- Display framebuffer is **320×240 RGB565 little-endian** (153,600 B); visible area
+  **296×240** (`mpos.DisplayMetrics.width()/height()`). App background `0x0862`.
+- `mpos.get_foreground_app()` returns the **fullname string**; `AppManager.start_app(fullname)`
+  works from raw REPL (paste mode not required to launch).
+- File transfer: `mpremote fs cp` works on a **freshly-booted** badge; it hangs/wedges
+  on a stressed one, and large exec-output (>~a few KB) stalls the CDC TX. The bundled
+  `tools/pull_file.py` (chunked base64) is the fallback puller.
+- **Wedged badge** recovery: physical RESET, or `esptool --before usb_reset --after hard_reset run`
+  (esptool wasn't installed on the host and pip is PEP-668-locked, so RESET was used).
+
+## Device identification (2024 vs 2026 badge)
+With multiple Espressif boards on USB, the **Fri3d 2024 and 2026 badges enumerate
+identically** (`303a:4001`, same CDC descriptors) — distinguishable only by the USB
+**`iSerial`** (`ID_SERIAL_SHORT`), never by `/dev/ttyACMx` (unstable) or VID:PID
+(ambiguous). The Lilygo TTGOs are trivially separate (`1a86:55d4`). Always address
+the target badge via `/dev/serial/by-id/…<serial>…`.
+
+## Observed app behaviour (live hardware)
+On a configured badge, the proximity finder detected a real co-located peer over BLE
+and raised the arrival banner — the end-to-end advertise → scan → intersect → alert
+flow works on live hardware. The logo still does not render on this build (blank
+middle; the known D-12 silent-decode issue). No pixel screenshot was obtainable, so
+the display was photographed with a phone for the record.
+
+---
+
 # Group Nametag + Proximity Finder — review-fix implementation, on-device test, UI tweaks — 2026-07-08
 
 Implemented the fixes from the Phase 0–4 code review, completed the DESIGN.md doc

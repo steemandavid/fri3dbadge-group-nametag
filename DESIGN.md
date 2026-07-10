@@ -49,7 +49,21 @@ Consequences (all verified by probe — see `probes/`):
 - A wedged badge (port opens, MCU silent) is recovered with
   `esptool.py --port /dev/ttyACM0 --before usb_reset --after hard_reset run`
   (bound with `timeout -s KILL`). `usbreset` only re-enumerates USB, not the core.
-- `mpos.capture_screenshot()` from a raw paste probe deadlocks lvgl → **avoid**.
+- `mpos.capture_screenshot()` **cannot produce a usable screenshot** on this build.
+  From a raw paste probe it deadlocks lvgl; from raw REPL (`mpremote run`/`exec`)
+  it instead writes a 153,600-B file (320×240×2 RGB565) that is a **scrambled
+  partial draw buffer, not a composited frame** — brute-forcing the row stride
+  120–512 yields zero empty columns for every width, so no byte-order/stride/
+  dimension reinterpretation gives a readable image. lvgl `snapshot` /
+  `snapshot_create` are **not compiled in**. For "what's on screen", read the
+  widgets instead: `mpos.get_all_widgets_with_text(lv.screen_active())` →
+  `w.get_text()` (both it and `print_screen_labels()` take the screen object as
+  one positional arg). See changelog 2026-07-10.
+- **Multiple Espressif boards on USB:** the Fri3d 2024 and 2026 badges enumerate
+  identically (`303a:4001`, same CDC descriptors) — distinguish them by the USB
+  **`iSerial`** (`ID_SERIAL_SHORT`), never by `/dev/ttyACMx` (unstable) or VID:PID
+  (ambiguous). Lilygo TTGOs are trivially separate (`1a86:55d4`). Always address the
+  target via `/dev/serial/by-id/…<serial>…`.
 - mpremote `run`/`exec` does **not** soft-reset; `sys.modules` is cached between
   runs — bust the cache (`del sys.modules[m]`) when iterating on uploaded code.
 
@@ -125,6 +139,7 @@ Non-connectable legacy advertising, one Manufacturer-Specific AD structure
 | Coalescing | ✅ | 2-arrival coalesced banner `"Alice, Bob nearby (Makerspace Baasrode)"` verified on-device; real-radio single-peer path confirmed (Alex → `"Alice nearby (Makerspace Baasrode)"`, rssi −50) with a 3-badge setup. |
 | Own-group line / unconfigured hint | ✅ | both verified on-device (labels present; hint shows + BLE skipped when `name`/`groups` empty). |
 | Backlight dim | ❌ dropped | no API; documented here. |
+| Still screenshot of running app | ❌ not achievable | `capture_screenshot()` writes a scrambled partial buffer (zero empty columns for every stride 120–512); `lv.snapshot` not compiled in. Read screen content via `get_all_widgets_with_text(screen_active())` instead. See changelog 2026-07-10. |
 
 The host-as-2nd-badge path uses `tools/host_advertise.py` (BlueZ D-Bus
 `LEAdvertisement1`, broadcast type, company `0xFFFF`). It registers cleanly; if
