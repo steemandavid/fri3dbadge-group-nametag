@@ -1,18 +1,20 @@
-# group_nametag.py — Group Nametag + BLE Proximity Finder.
+# group_nametag.py — "!friends nearby" (Group Nametag + BLE Proximity Finder).
 #
-# A MicroPythonOS Activity for the Fri3d Camp 2024 badge (2024 HW, MicroPythonOS
-# 0.11.1). Shows a group logo + the wearer's name, and alerts when another badge
-# sharing at least one group comes within Bluetooth range.
+# A MicroPythonOS Activity that runs on BOTH the Fri3d Camp 2024 badge and the
+# Fri3d Camp 2026 badge (both ESP32-S3 + MicroPythonOS). Shows your name (big,
+# scrolls when long) and your group(s) as full-width coloured pills, and quietly
+# alerts you when another badge sharing one of your groups comes within Bluetooth
+# range. Press A for a per-friend panel; B mutes; X quits.
 #
-# Adapted from PLAN.md: the behavioural design (BLE protocol, multi-group
-# matching, proximity state machine, per-group signature, alerts, idle UI) is
-# unchanged; only the framework shell moved from the (absent) fri3d.application
-# `App` class to MicroPythonOS's `Activity`. See DESIGN.md.
+# Controls:
+#   A      = toggle the friends-nearby detail panel
+#   B      = mute / unmute the alert buzzer  (persisted; label reflects state)
+#   X      = (OS) quit to the launcher
+# (START is intentionally unused.)
 #
-# Controls (raw button pins; see DESIGN.md):
-#   X      = mute/unmute the alert buzzer
-#   A      = toggle the nearby-list detail view
-#   START  = exit back to the launcher   (OS back gesture also works)
+# Board differences are abstracted at runtime (2024: direct-GPIO buttons + GPIO46
+# buzzer + 296x240; 2026: CH32X035 I2C-expander buttons + GPIO38 buzzer + 320x240
+# + backlight). See DESIGN.md "2024 vs 2026".
 
 import os
 import sys
@@ -21,57 +23,83 @@ import time
 import json
 import asyncio
 
-# App dir on the device filesystem (sibling modules + config + logo live here).
 APP_DIR = "/apps/com.fri3dcamp.groupnametag"
 if APP_DIR not in sys.path:
     sys.path.insert(0, APP_DIR)
 
 import lvgl as lv
 from mpos import Activity, TaskManager, BatteryManager, lights
+import mpos
 
 from ble_proximity import (
     BLEProximity, build_own_table, hash_groups, fnv1a_16,
     EVICT_MS, RSSI_FLOOR_DEFAULT,
 )
 
-W, H = 296, 240
+try:
+    W = mpos.DisplayMetrics.width()
+    H = mpos.DisplayMetrics.height()
+except Exception:
+    W, H = 296, 240
 
-# Tunables
-BREATH_PERIOD_MS = 2600
-BREATH_AMP = 14          # scale units (256 == 1.0x)
-BANNER_MS = 2500
-DIM_MS = 30000           # backlight idle dim
+BANNER_MS_DEFAULT = 5000
 TICK_MS = 30
 
-# Name label: rendered at font_montserrat_28 (the largest built-in font) then
-# scaled 1.5x via an lvgl transform (256 == 1.0x) so it reads big at the top.
-NAME_SCALE = 384         # 384/256 = 1.5x
-NAME_TOP = 6             # y of the (scaled) name at the top of the screen
+# Name: font_montserrat_28 scaled up; long names marquee-scroll on one line.
+NAME_SCALE = 512                  # 2.0x (UNUSED now — scaling a scrolling label starves the CPU)
+NAME_TOP = 24
+NAME_H_SCALED = 33                # font_montserrat_28 line height (no transform scale)
+NAME_W = W - 60
 
-# Logo fit-to-box (PLAN §7): the source image is scaled to fit this box so an
-# arbitrary group logo neither overlaps the name nor overflows the 296x240 screen.
-# Sits below the enlarged name (which now occupies the top band).
-LOGO_BOX_W = 180
-LOGO_BOX_H = 74
-LOGO_TOP = 74            # y of the fitted logo's top (below the big name)
+BATT_X = W - 72
+BATT_Y = 8
 
-# Button GPIOs (Fri3d 2024 badge; pull-up, value()==0 == pressed)
-BTN = {"start": 0, "x": 38, "a": 39, "b": 40, "y": 41, "menu": 45}
+# Group pills: full width, stacked vertically, below the name.
+PILL_MARGIN_X = 16
+PILL_TOP = NAME_TOP + NAME_H_SCALED + 8     # clear of the scaled name
+PILL_H = 22
+PILL_GAP = 4
+MAX_PILLS = 4
 
-# Palette (RGB888)
+CONTROLS_TOP = H - 16
+
+# Button hardware (see DESIGN.md "2024 vs 2026").
+START_PIN = 0
+BTN_2024 = {"a": 39, "b": 40}             # direct GPIO (active-low, pull-up)
+BTN_2024_DIAG = (0, 38, 39, 40, 41, 45)   # raw-GPIO pins logged for diagnostics
+BTN_2026_EXP = {"a": 7, "b": 6}           # mpos.io_expander.digital index (active-high)
+BUZZER_PIN_2024 = 46
+BUZZER_PIN_2026 = 38
+
 COL_BG = 0x0B0E14
 COL_NAME = 0xFFFFFF
-COL_HANDLE = 0x9FB4D0
-COL_OWN = 0x6FBF73
 COL_NEAR = 0xFFE066
 COL_NONE = 0x6A7280
 COL_HINT = 0xFF8C42
 COL_BATT = 0x8FA8B8
 COL_BANNER = 0x143A2A
+COL_MUTED = 0x7B8AA0
+COL_PANEL = 0x121826
+COL_CARD = 0x162033
+COL_CARD_LINE = 0x28324A
+COL_BAR_ON = 0x9FE0A0
+COL_BAR_OFF = 0x2A3346
+
+
+def _detect_2026():
+    try:
+        if str(mpos.DeviceInfo.get_hardware_id()).startswith("fri3d_2026"):
+            return True
+    except Exception:
+        pass
+    try:
+        _ = mpos.io_expander.version
+        return True
+    except Exception:
+        return False
 
 
 def _hsv(h, s=0.85, v=0.6):
-    """ hsv->rgb tuple, h in degrees. Used for per-group LED colour signature. """
     h = h % 360
     c = v * s
     x = c * (1 - abs((h / 60.0) % 2 - 1))
@@ -86,10 +114,19 @@ def _hsv(h, s=0.85, v=0.6):
 
 
 def _sig_from_id(gid):
-    """Deterministic (hue, freq) per-group signature from a 16-bit group id."""
-    hue = (gid * 137.508) % 360          # golden-angle hue spread
-    freq = 440 + (gid % 12) * 55         # ~one octave+ of buzz tones
-    return hue, freq
+    return (gid * 137.508) % 360, 440 + (gid % 12) * 55
+
+
+def _col(hexv):
+    return lv.color_hex(hexv)
+
+
+def _rssi_bars(rssi):
+    try:
+        lvl = (int(rssi) + 100) // 15
+    except Exception:
+        lvl = 0
+    return 0 if lvl < 0 else (4 if lvl > 4 else lvl)
 
 
 class GroupNametag(Activity):
@@ -99,41 +136,47 @@ class GroupNametag(Activity):
         self._config = {}
         self._own_table = []
         self._unconfigured = False
+        self._is_2026 = False
+        self._has_backlight = False
         self._sound = True
+        self._banner_ms = BANNER_MS_DEFAULT
         self._detail = False
         self._btn_pins = {}
+        self._pin_prev = {}
         self._prev = {}
         self._task = None
         self._t0 = 0
         self._last_input_ms = 0
-        self._logo_im = None
-        self._logo_base_scale = 256
         self._banner = None
         self._banner_bg = None
         self._banner_until = 0
-        self._alert_names = []        # arrivals accumulated across the current banner window
-        self._finishing = False       # set when START/B requests exit -> loop breaks cleanly
+        self._alert_names = []
+        self._finishing = False
         self._buzzer = None
-        self._disp = None
         self._dimmed = False
-        # widgets (created in _build_idle for configured mode)
-        self._name_lbl = None
-        self._handle_lbl = None
-        self._own_lbl = None
-        self._batt_lbl = None
-        self._near_lbl = None
-        self._detail_lbl = None
         self._batt_next_ms = 0
+        self._name_lbl = None
+        self._batt_lbl = None
+        self._pills = []
+        self._friends_lbl = None
+        self._friends_top = PILL_TOP
+        self._detail_panel = None
+        self._detail_header = None
+        self._detail_rows = []
+        self._controls_lbl = None
+        self._friends_last = None
+        self._detail_header_last = None
+        self._batt_last = None
 
     # ------------------------------------------------------------------ config
     def _load_config(self):
-        cfg = {"groups": [], "name": "", "handle": "", "rssi_floor": RSSI_FLOOR_DEFAULT}
+        cfg = {"groups": [], "name": "", "handle": "", "rssi_floor": RSSI_FLOOR_DEFAULT,
+               "sound": True, "banner_ms": BANNER_MS_DEFAULT}
         try:
             with open(APP_DIR + "/config.json", "r") as f:
                 cfg.update(json.load(f))
         except Exception:
             pass
-        # validate / normalise
         if not isinstance(cfg.get("groups"), list):
             cfg["groups"] = []
         cfg["name"] = (cfg.get("name") or "").strip()
@@ -143,27 +186,62 @@ class GroupNametag(Activity):
         except (TypeError, ValueError):
             rf = RSSI_FLOOR_DEFAULT
         cfg["rssi_floor"] = rf
+        board = cfg.get("board")
+        if board == "2026":
+            self._is_2026 = True
+        elif board == "2024":
+            self._is_2026 = False
+        else:
+            self._is_2026 = _detect_2026()
+        self._sound = bool(cfg.get("sound", True))
+        try:
+            self._banner_ms = int(cfg.get("banner_ms", BANNER_MS_DEFAULT))
+        except (TypeError, ValueError):
+            self._banner_ms = BANNER_MS_DEFAULT
         self._config = cfg
         self._own_table = build_own_table(cfg["groups"])
         ids = [gid for _, gid in self._own_table]
         self._unconfigured = (not cfg["name"]) or (not ids)
 
+    def _save_config(self, key, value):
+        try:
+            with open(APP_DIR + "/config.json", "r") as f:
+                cfg = json.load(f)
+            cfg[key] = value
+            with open(APP_DIR + "/config.json", "w") as f:
+                json.dump(cfg, f)
+        except Exception:
+            pass
+
     # ------------------------------------------------------------------ buttons
     def _setup_buttons(self):
         from machine import Pin
         self._btn_pins = {}
-        for name, gp in BTN.items():
+        self._pin_prev = {}
+        if self._is_2026:
+            return  # 2026 reads via mpos.io_expander; no raw pins
+        for gp in BTN_2024_DIAG:
             try:
-                self._btn_pins[name] = Pin(gp, Pin.IN, Pin.PULL_UP)
+                self._btn_pins["p%d" % gp] = Pin(gp, Pin.IN, Pin.PULL_UP)
+                self._pin_prev[gp] = 1
             except Exception:
                 pass
 
     def _held(self, name):
-        p = self._btn_pins.get(name)
-        if p is None:
+        if self._is_2026:
+            idx = BTN_2026_EXP.get(name)
+            if idx is None:
+                return False
+            try:
+                return bool(mpos.io_expander.digital[idx])
+            except Exception:
+                return False
+        gp = BTN_2024.get(name)
+        if gp is None:
             return False
+        p = self._btn_pins.get("p%d" % gp)
         try:
-            return p.value() == 0
+            return p is not None and p.value() == 0
         except Exception:
             return False
 
@@ -183,7 +261,8 @@ class GroupNametag(Activity):
     def _setup_buzzer(self):
         try:
             from machine import PWM, Pin
-            self._buzzer = PWM(Pin(46), freq=2000, duty_u16=0)
+            pin = BUZZER_PIN_2026 if self._is_2026 else BUZZER_PIN_2024
+            self._buzzer = PWM(Pin(pin), freq=2000, duty_u16=0)
         except Exception:
             self._buzzer = None
 
@@ -202,207 +281,276 @@ class GroupNametag(Activity):
 
     # ------------------------------------------------------------------ display
     def _setup_display(self):
-        # Backlight/brightness API is absent on this build (verified), so dim is
-        # disabled — self._disp stays None and _set_brightness/_tick_dim no-op.
-        try:
-            d = lv.display_get_default()
-            self._disp = d if hasattr(d, "set_brightness") else None
-        except Exception:
-            self._disp = None
+        self._has_backlight = False
+        if self._is_2026:
+            try:
+                mpos.io_expander.lcd_brightness = 100
+                self._has_backlight = True
+            except Exception:
+                self._has_backlight = False
 
     def _set_brightness(self, v):
-        if self._disp is None:
+        if not self._has_backlight:
             return
         try:
-            self._disp.set_brightness(v)   # API present? defensive (DESIGN.md)
+            mpos.io_expander.lcd_brightness = max(0, min(100, int(v * 100 // 255)))
         except Exception:
-            self._disp = None              # API absent -> disable dim feature
+            self._has_backlight = False
 
-    # ------------------------------------------------------------------ logo
-    def _read_png_size(self, path):
-        # Read (w, h) straight from the PNG IHDR — deterministic, and independent
-        # of when lvgl actually decodes the image.
+    # ------------------------------------------------------------------ widgets
+    def _label(self, scr, x, y, text, color, font=None, center=False, w=W):
+        lbl = lv.label(scr)
+        lbl.set_text(text)
+        lbl.set_style_text_color(_col(color), 0)
+        if font:
+            lbl.set_style_text_font(font, 0)
+        if center:
+            lbl.set_width(w)
+            lbl.set_style_text_align(lv.TEXT_ALIGN.CENTER, 0)
+            lbl.set_pos(x, y)
+        else:
+            lbl.set_pos(x, y)
+        return lbl
+
+    def _rbox(self, parent, x, y, w, h, color, opa=lv.OPA.COVER, radius=0):
+        o = lv.obj(parent)
+        o.remove_style_all()
+        o.set_size(w, h)
+        o.set_pos(x, y)
+        o.set_style_bg_color(_col(color), 0)
+        o.set_style_bg_opa(opa, 0)
+        if radius:
+            o.set_style_radius(radius, 0)
+        return o
+
+    def _make_bars(self, parent, x, y):
+        bars = []
+        bx = x
+        for i in range(4):
+            bh = 3 + i * 2
+            bars.append(self._rbox(parent, bx, y + (9 - bh), 3, bh, COL_BAR_OFF, radius=1))
+            bx += 4
+        return bars
+
+    def _set_bars(self, bars, level):
+        for i, b in enumerate(bars):
+            try:
+                b.set_style_bg_color(_col(COL_BAR_ON if i < level else COL_BAR_OFF), 0)
+            except Exception:
+                pass
+
+    def _color_for_gid(self, gid):
+        hue, _ = _sig_from_id(gid)
+        r, g, b = _hsv(hue)
+        return (r << 16) | (g << 8) | b
+
+    def _short(self, s, n):
+        s = (s or "").strip()
+        return s if len(s) <= n else s[: n - 1] + "…"
+
+    def _controls_text(self):
+        # "B:mute" while unmuted, "B:unmute" while muted.
+        return "A:list   B:%s   X:quit" % ("mute" if self._sound else "unmute")
+
+    # ------------------------------------------------------------------ pills (full width, stacked)
+    def _place_pills(self, scr):
+        self._pills = []
+        groups = self._own_table[:MAX_PILLS]
+        y = PILL_TOP
+        pw = W - 2 * PILL_MARGIN_X
+        if not groups:
+            self._friends_top = PILL_TOP
+            return
+        for gname, gid in groups:
+            hue, _ = _sig_from_id(gid)
+            r, g, b = _hsv(hue, s=0.6, v=0.5)
+            col = (r << 16) | (g << 8) | b
+            pill = self._rbox(scr, PILL_MARGIN_X, y, pw, PILL_H, col, radius=PILL_H // 2)
+            try:
+                pill.set_style_border_width(1, 0)
+                pill.set_style_border_color(_col(0xFFFFFF), 0)
+                pill.set_style_border_opa(50, 0)
+            except Exception:
+                pass
+            lbl = lv.label(pill)
+            lbl.set_text(gname)
+            lbl.set_style_text_color(_col(0xFFFFFF), 0)
+            lbl.set_style_text_font(lv.font_montserrat_16, 0)
+            try:
+                lbl.set_long_mode(lv.label.LONG_MODE.SCROLL_CIRCULAR)
+                lbl.set_width(pw - 16)
+            except Exception:
+                pass
+            try:
+                lbl.align(lv.ALIGN.LEFT_MID, 8, 0)
+            except Exception:
+                lbl.set_pos(8, 4)
+            self._pills.append((pill, lbl))
+            y += PILL_H + PILL_GAP
+        self._friends_top = y + 2
+
+    # ------------------------------------------------------------------ detail panel
+    def _make_detail_row(self, panel, index, card_w):
+        y = 30 + index * (30 + 4)
+        row = self._rbox(panel, 4, y, card_w - 8, 30, COL_CARD, radius=8)
         try:
-            with open(path, "rb") as f:
-                hdr = f.read(24)
-            if len(hdr) >= 24 and hdr[:8] == b"\x89PNG\r\n\x1a\n":
-                import struct
-                w, h = struct.unpack(">II", hdr[16:24])
-                if w > 0 and h > 0:
-                    return w, h
+            row.set_style_border_width(1, 0)
+            row.set_style_border_color(_col(COL_CARD_LINE), 0)
         except Exception:
             pass
-        return None
+        dot = self._rbox(row, 8, 9, 11, 11, COL_NONE, radius=5)
+        name = lv.label(row)
+        name.set_pos(26, 2)
+        name.set_style_text_color(_col(COL_NAME), 0)
+        name.set_style_text_font(lv.font_montserrat_16, 0)
+        grp = lv.label(row)
+        grp.set_pos(26, 16)
+        grp.set_style_text_color(_col(COL_MUTED), 0)
+        grp.set_style_text_font(lv.font_montserrat_12, 0)
+        dbm = lv.label(row)
+        dbm.set_pos(card_w - 16 - 36, 4)
+        dbm.set_style_text_color(_col(COL_MUTED), 0)
+        dbm.set_style_text_font(lv.font_montserrat_12, 0)
+        age = lv.label(row)
+        age.set_pos(card_w - 16 - 36, 17)
+        age.set_style_text_color(_col(COL_MUTED), 0)
+        age.set_style_text_font(lv.font_montserrat_12, 0)
+        bars = self._make_bars(row, card_w - 16 - 52, 8)
+        self._detail_rows.append({"row": row, "dot": dot, "name": name, "grp": grp,
+                                  "bars": bars, "dbm": dbm, "age": age})
 
-    def _logo_file_ok(self, path):
-        # Exists and non-empty. lvgl decodes silently and won't raise on a
-        # missing/empty file (verified on-device), so gate on the file itself.
-        try:
-            return os.stat(path)[6] > 0     # st_size
-        except Exception:
-            return False
-
-    def _place_logo(self, scr):
-        logo_path = APP_DIR + "/logo.png"
-        size = self._read_png_size(logo_path)
-        # Deterministic decode-viability gate (D-12): a missing / empty /
-        # non-PNG file would otherwise decode to nothing *without* raising,
-        # leaving a blank space. Fall back to the drawn placeholder instead.
-        if size is None and not self._logo_file_ok(logo_path):
-            self._logo_im = self._placeholder_logo(scr)
+    def _fill_row(self, slot, peer):
+        name, gname, gid, rssi, age = peer
+        lvl = _rssi_bars(rssi)
+        dbm = "%ddB" % int(rssi)
+        ag = "%ds" % (int(age) // 1000)
+        col = self._color_for_gid(gid)
+        key = (name, gname, dbm, ag, lvl, col)
+        if slot.get("last") == key:        # skip lvgl re-render when unchanged
             return
+        slot["last"] = key
         try:
-            self._logo_im = lv.image(scr)
-            self._logo_im.set_src("S:" + logo_path)
+            slot["dot"].set_style_bg_color(_col(col), 0)
         except Exception:
-            self._logo_im = self._placeholder_logo(scr)
-            return
-        if size:
-            w, h = size
-            # scale = min(box_w/img_w, box_h/img_h) x 256 (PLAN §7)
-            base = int(min(LOGO_BOX_W / w, LOGO_BOX_H / h) * 256)
-            if base < 32:
-                base = 32
-            self._logo_base_scale = base
-            fitted_h = h * base // 256
-            try:
-                self._logo_im.set_pivot(w // 2, h // 2)   # scale about the image centre
-            except Exception:
-                pass
-            # With a centre pivot the object box is still w*h; offset so the
-            # *scaled* image's top lands at LOGO_TOP, clear of the name label.
-            y_off = LOGO_TOP - (h - fitted_h) // 2
-            self._logo_im.align(lv.ALIGN.TOP_MID, 0, y_off)
-            try:
-                self._logo_im.set_scale(base)
-            except Exception:
-                pass
-        else:
-            # Unknown dimensions (non-PNG / unreadable) — keep native scale.
-            self._logo_base_scale = 256
-            self._logo_im.align(lv.ALIGN.TOP_MID, 0, LOGO_TOP)
+            pass
+        try:
+            slot["name"].set_text(self._short(name, 16))
+        except Exception:
+            pass
+        self._set_bars(slot["bars"], lvl)
+        try:
+            slot["dbm"].set_text(dbm)
+        except Exception:
+            pass
+        try:
+            slot["grp"].set_text(self._short(gname or "?", 18))
+        except Exception:
+            pass
+        try:
+            slot["age"].set_text(ag)
+        except Exception:
+            pass
 
-    def _placeholder_logo(self, scr):
-        # Runtime fallback if logo.png is missing/broken: a coloured disc + tag.
-        obj = lv.obj(scr)
-        obj.remove_style_all()
-        obj.set_size(100, 100)
-        obj.set_style_bg_color(lv.color_hex(0x2A6F4F), 0)
-        obj.set_style_bg_opa(lv.OPA.COVER, 0)
-        obj.set_style_radius(50, 0)
-        obj.align(lv.ALIGN.TOP_MID, 0, LOGO_TOP)
-        lbl = lv.label(obj)
-        lbl.set_text("HS")
-        lbl.set_style_text_color(lv.color_hex(0xFFFFFF), 0)
-        lbl.set_style_text_font(lv.font_montserrat_28, 0)
-        lbl.center()
-        return obj
+    def _show_row(self, slot, show):
+        if slot.get("vis") == show:        # don't re-set the flag every tick
+            return
+        slot["vis"] = show
+        try:
+            if show:
+                slot["row"].remove_flag(lv.obj.FLAG.HIDDEN)
+            else:
+                slot["row"].add_flag(lv.obj.FLAG.HIDDEN)
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------ UI build
     def _build_idle(self, scr):
-        scr.set_style_bg_color(lv.color_hex(COL_BG), 0)
+        scr.set_style_bg_color(_col(COL_BG), 0)
         scr.set_style_bg_opa(lv.OPA.COVER, 0)
         cfg = self._config
 
         if self._unconfigured:
-            self._label(scr, 0, 70, "Configure me", COL_HINT,
-                        font=lv.font_montserrat_24, center=True)
-            self._label(scr, 0, 110, "edit  config.json", COL_NONE,
-                        font=lv.font_montserrat_16, center=True)
-            self._label(scr, 0, 134, "(set: name, groups)", COL_NONE,
-                        font=lv.font_montserrat_14, center=True)
-            self._label(scr, 0, 168, "then replace logo.png", COL_NONE,
-                        font=lv.font_montserrat_14, center=True)
-            self._label(scr, 0, 205, "BLE off until configured", COL_BATT,
-                        font=lv.font_montserrat_14, center=True)
+            self._label(scr, 0, 70, "Configure me", COL_HINT, font=lv.font_montserrat_24, center=True)
+            self._label(scr, 0, 110, "edit  config.json", COL_NONE, font=lv.font_montserrat_16, center=True)
+            self._label(scr, 0, 134, "(set: name, groups)", COL_NONE, font=lv.font_montserrat_14, center=True)
+            self._label(scr, 0, 205, "BLE off until configured", COL_BATT, font=lv.font_montserrat_14, center=True)
+            self._controls_lbl = self._label(scr, 0, CONTROLS_TOP, self._controls_text(),
+                                             COL_NONE, font=lv.font_montserrat_12, center=True)
             return
 
-        # Name: big (font 28 x 1.5 transform) at the very top of the screen.
-        self._name_lbl = self._label(scr, 0, NAME_TOP, cfg["name"], COL_NAME,
-                                     font=lv.font_montserrat_28, center=True)
+        # Name: largest built-in font, single line, scrolls when too long.
+        # (No transform scale: scaling a scrolling label re-renders every frame
+        #  and starves the CPU -> missed buttons + stretched chime.)
+        self._name_lbl = self._label(scr, (W - NAME_W) // 2, NAME_TOP, cfg["name"],
+                                     COL_NAME, font=lv.font_montserrat_28, center=True, w=NAME_W)
         try:
-            # Scale about the label's horizontal centre so it stays centred and
-            # grows downward (full-width label -> centre x is the screen centre).
-            self._name_lbl.set_style_transform_pivot_x(W // 2, 0)
-            self._name_lbl.set_style_transform_pivot_y(0, 0)
-            self._name_lbl.set_style_transform_scale(NAME_SCALE, 0)
+            self._name_lbl.set_long_mode(lv.label.LONG_MODE.SCROLL_CIRCULAR)
         except Exception:
             pass
 
-        self._place_logo(scr)
+        self._batt_lbl = self._label(scr, BATT_X, BATT_Y, "--%", COL_BATT, font=lv.font_montserrat_14)
 
-        if cfg["handle"]:
-            self._handle_lbl = self._label(scr, 0, 52, cfg["handle"], COL_HANDLE,
-                                           font=lv.font_montserrat_16, center=True)
-        else:
-            self._handle_lbl = None
+        # Group pills (full width, stacked) -> sets self._friends_top.
+        self._place_pills(scr)
 
-        # own groups (below the logo), battery (top-right corner)
-        own = ", ".join(cfg["groups"])[:34]
-        self._own_lbl = self._label(scr, 0, 150, own, COL_OWN,
-                                    font=lv.font_montserrat_14, center=True)
-        self._batt_lbl = self._label(scr, W - 46, 8, "--%", COL_BATT,
-                                     font=lv.font_montserrat_14)
+        # Friends line directly under the pills.
+        self._friends_lbl = self._label(scr, 0, self._friends_top, "looking for friends…",
+                                        COL_NONE, font=lv.font_montserrat_14, center=True)
 
-        # nearby line (bottom) + detail list
-        self._near_lbl = self._label(scr, 0, H - 34, "scanning...", COL_NONE,
-                                     font=lv.font_montserrat_14, center=True)
-        self._detail_lbl = self._label(scr, 4, 172, "", COL_NEAR,
-                                       font=lv.font_montserrat_12)
-        self._detail_lbl.add_flag(lv.obj.FLAG.HIDDEN)
+        # Controls (dynamic B label).
+        self._controls_lbl = self._label(scr, 0, CONTROLS_TOP, self._controls_text(),
+                                         COL_NONE, font=lv.font_montserrat_12, center=True)
 
-        # help line
-        self._label(scr, 0, H - 16, "A:detail  X:mute  B/START:exit", COL_NONE,
-                    font=lv.font_montserrat_12, center=True)
+        # A-button detail panel (hidden by default).
+        dpw = W - 48
+        self._detail_panel = self._rbox(scr, (W - dpw) // 2, 60, dpw, H - 64, COL_PANEL, radius=10)
+        try:
+            self._detail_panel.set_style_border_width(2, 0)
+            self._detail_panel.set_style_border_color(_col(COL_NEAR), 0)
+            self._detail_panel.set_style_pad_all(4, 0)
+        except Exception:
+            pass
+        self._detail_header = lv.label(self._detail_panel)
+        self._detail_header.set_text("FRIENDS NEARBY")
+        self._detail_header.set_style_text_color(_col(COL_NEAR), 0)
+        self._detail_header.set_style_text_font(lv.font_montserrat_16, 0)
+        self._detail_header.set_pos(8, 6)
+        for i in range(6):
+            self._make_detail_row(self._detail_panel, i, dpw)
+        self._detail_panel.add_flag(lv.obj.FLAG.HIDDEN)
 
-        # alert banner (hidden by default)
+        # Alert banner (hidden), on top.
         self._banner_bg = lv.obj(scr)
         self._banner_bg.remove_style_all()
         self._banner_bg.set_size(W - 24, 46)
-        self._banner_bg.set_style_bg_color(lv.color_hex(COL_BANNER), 0)
+        self._banner_bg.set_style_bg_color(_col(COL_BANNER), 0)
         self._banner_bg.set_style_bg_opa(lv.OPA.COVER, 0)
         self._banner_bg.set_style_radius(10, 0)
         self._banner_bg.set_style_border_width(2, 0)
-        self._banner_bg.set_style_border_color(lv.color_hex(COL_NEAR), 0)
+        self._banner_bg.set_style_border_color(_col(COL_NEAR), 0)
         self._banner_bg.align(lv.ALIGN.CENTER, 0, 0)
         self._banner = lv.label(self._banner_bg)
-        self._banner.set_style_text_color(lv.color_hex(0xFFFFFF), 0)
+        self._banner.set_style_text_color(_col(0xFFFFFF), 0)
         self._banner.set_style_text_font(lv.font_montserrat_18, 0)
         self._banner.set_width(W - 40)
         self._banner.set_style_text_align(lv.TEXT_ALIGN.CENTER, 0)
         self._banner.center()
         self._hide_banner()
 
-    def _label(self, scr, x, y, text, color, font=None, center=False, w=W):
-        lbl = lv.label(scr)
-        lbl.set_text(text)
-        lbl.set_style_text_color(lv.color_hex(color), 0)
-        if font:
-            lbl.set_style_text_font(font, 0)
-        if center:
-            lbl.set_width(w)
-            lbl.set_style_text_align(lv.TEXT_ALIGN.CENTER, 0)
-            lbl.set_pos(0, y)
-        else:
-            lbl.set_pos(x, y)
-        return lbl
-
     # ------------------------------------------------------------------ banner
     def _show_banner(self, text):
         self._banner.set_text(text)
         self._banner_bg.remove_flag(lv.obj.FLAG.HIDDEN)
-        self._banner_until = time.ticks_add(time.ticks_ms(), BANNER_MS)
+        self._banner_until = time.ticks_add(time.ticks_ms(), self._banner_ms)
 
     def _hide_banner(self):
         self._banner_bg.add_flag(lv.obj.FLAG.HIDDEN)
         self._banner_until = 0
 
     def _coalesced_text(self, arrivals):
-        # Group arrivals by shared group signature for the banner.
         by_group = {}
         for a in arrivals:
-            key = a["shared_name"] or "?"
-            by_group.setdefault(key, []).append(a["name"] or "?")
+            by_group.setdefault(a["shared_name"] or "?", []).append(a["name"] or "?")
         if len(by_group) == 1:
             g, names = next(iter(by_group.items()))
             names_s = ", ".join(names)
@@ -416,7 +564,6 @@ class GroupNametag(Activity):
     def _fire_alert(self, arrivals):
         if not arrivals:
             return
-        # signature = lowest shared id among the arrivals (both badges agree)
         ids = [a["shared_id"] for a in arrivals if a["shared_id"] is not None]
         lowest = min(ids) if ids else 0
         hue, freq = _sig_from_id(lowest)
@@ -511,13 +658,10 @@ class GroupNametag(Activity):
     async def _loop(self):
         last = time.ticks_ms()
         while True:
-            # Per-frame isolation: a transient error skips one frame instead of
-            # killing the loop (which would freeze the UI and all buttons).
             try:
                 now = time.ticks_ms()
                 dt = time.ticks_diff(now, last)
                 last = now
-
                 self._handle_buttons()
                 if self._finishing:
                     break
@@ -525,8 +669,13 @@ class GroupNametag(Activity):
                 self._drain_arrivals()
                 self._refresh_nearby()
                 self._refresh_battery(now)
-                self._animate(now)
-                self._tick_dim(now)
+                if self._banner_until and time.ticks_diff(now, self._banner_until) >= 0:
+                    self._hide_banner()
+                if (self._has_backlight and not self._dimmed and
+                        time.ticks_diff(now, self._last_input_ms) > 30000 and
+                        not self._ble.has_peers()):
+                    self._set_brightness(60)
+                    self._dimmed = True
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -534,27 +683,30 @@ class GroupNametag(Activity):
             await asyncio.sleep_ms(TICK_MS)
 
     def _handle_buttons(self):
-        for name in ("a", "x", "start", "b", "y", "menu"):
+        for name in ("a", "b"):
             ev = self._edge(name)
             if not ev:
                 continue
             self._wake()
-            if ev == "x":
+            if ev == "b":
                 self._sound = not self._sound
+                self._save_config("sound", self._sound)
                 self._flash_leds(*_hsv(0 if not self._sound else 120))
+                if self._controls_lbl is not None:
+                    try:
+                        self._controls_lbl.set_text(self._controls_text())
+                    except Exception:
+                        pass
             elif ev == "a":
                 self._detail = not self._detail
-                if self._detail_lbl is not None:
-                    if self._detail:
-                        self._detail_lbl.remove_flag(lv.obj.FLAG.HIDDEN)
-                    else:
-                        self._detail_lbl.add_flag(lv.obj.FLAG.HIDDEN)
-            elif ev == "start" or ev == "b":
-                # B / START -> return to the launcher (PLAN §8). Flag so the loop
-                # breaks before touching widgets finish() may have torn down.
-                self._finishing = True
-                self.finish()
-                return
+                if self._detail_panel is not None:
+                    try:
+                        if self._detail:
+                            self._detail_panel.remove_flag(lv.obj.FLAG.HIDDEN)
+                        else:
+                            self._detail_panel.add_flag(lv.obj.FLAG.HIDDEN)
+                    except Exception:
+                        pass
 
     def _drain_arrivals(self):
         if self._unconfigured:
@@ -563,11 +715,7 @@ class GroupNametag(Activity):
         if not arrivals:
             return
         now = time.ticks_ms()
-        # Coalesce across the whole banner window (PLAN §8): the first arrival
-        # fires one cue (banner + LED + sting); further arrivals while the banner
-        # is still up only extend the banner text — no extra sting/flash.
-        banner_active = self._banner_until and time.ticks_diff(now, self._banner_until) < 0
-        if banner_active:
+        if self._banner_until and time.ticks_diff(now, self._banner_until) < 0:
             self._alert_names.extend(arrivals)
             try:
                 self._banner.set_text(self._coalesced_text(self._alert_names))
@@ -578,55 +726,45 @@ class GroupNametag(Activity):
             self._fire_alert(self._alert_names)
 
     def _refresh_nearby(self):
-        if self._unconfigured or self._near_lbl is None:
+        if self._unconfigured or self._friends_lbl is None:
             return
         peers = self._ble.current_peers()
-        if not peers:
-            self._near_lbl.set_text("nobody nearby")
-            self._near_lbl.set_style_text_color(lv.color_hex(COL_NONE), 0)
-        else:
-            names = ", ".join(p[0] for p in peers)[:40]
-            self._near_lbl.set_text("nearby: " + names)
-            self._near_lbl.set_style_text_color(lv.color_hex(COL_NEAR), 0)
-        if self._detail and self._detail_lbl is not None:
-            lines = []
-            for name, gname, gid, rssi, age in peers[:6]:
-                lines.append("%s  %s  %ddBm  %ds" % (name[:12], (gname or "?")[:12], rssi, age // 1000))
-            self._detail_lbl.set_text("\n".join(lines) if lines else "no peers")
-
-    def _animate(self, now):
-        # breathing logo scale
-        if self._logo_im is not None and not self._unconfigured:
-            t = time.ticks_diff(now, self._t0)
-            phase = (t % BREATH_PERIOD_MS) / BREATH_PERIOD_MS
-            s = int(self._logo_base_scale + BREATH_AMP * math.sin(phase * 2 * math.pi))
+        n = len(peers)
+        new_txt = (("Friends nearby: " + ", ".join(p[0] for p in peers)[:48])
+                   if n else "looking for friends…")
+        if new_txt != self._friends_last:
             try:
-                self._logo_im.set_scale(s)
+                self._friends_lbl.set_text(new_txt)
+                self._friends_lbl.set_style_text_color(_col(COL_NEAR if n else COL_NONE), 0)
             except Exception:
                 pass
-        # auto-hide banner
-        if self._banner_until and time.ticks_diff(now, self._banner_until) >= 0:
-            self._hide_banner()
-
-    def _tick_dim(self, now):
-        if self._disp is None:
-            return
-        if (not self._dimmed and
-                time.ticks_diff(now, self._last_input_ms) > DIM_MS and
-                not self._ble.has_peers()):
-            self._set_brightness(60)
-            self._dimmed = True
+            self._friends_last = new_txt
+        for i, slot in enumerate(self._detail_rows):
+            if i < n:
+                self._fill_row(slot, peers[i])
+                self._show_row(slot, True)
+            else:
+                self._show_row(slot, False)
+        new_hdr = (("FRIENDS NEARBY · %d" % n) if n else "no friends nearby yet")
+        if new_hdr != self._detail_header_last and self._detail_header is not None:
+            try:
+                self._detail_header.set_text(new_hdr)
+            except Exception:
+                pass
+            self._detail_header_last = new_hdr
 
     # ------------------------------------------------------------------ battery
     def _refresh_battery(self, now):
-        # ticks_diff is wrap-safe (PLAN §6.3) — never compare raw ticks_ms values.
         if self._batt_lbl is None or time.ticks_diff(now, self._batt_next_ms) < 0:
             return
         self._batt_next_ms = time.ticks_add(now, 5000)
-        try:
-            self._batt_lbl.set_text(self._battery_text())
-        except Exception:
-            pass
+        txt = self._battery_text()
+        if txt != self._batt_last:
+            try:
+                self._batt_lbl.set_text(txt)
+            except Exception:
+                pass
+            self._batt_last = txt
 
     def _battery_text(self):
         try:

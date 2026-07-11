@@ -1,3 +1,57 @@
+# !friends nearby — UI redesign + Fri3d 2026 support + button/perf fixes — 2026-07-11
+
+Renamed the app to **"!friends nearby"** and redesigned the screen; added Fri3d
+2026 badge support; fixed button handling and a CPU-starvation bug. No BLE /
+protocol / test changes (`ble_proximity.py` untouched, 30/30 pytest still green).
+
+## UI redesign (group_nametag.py, MANIFEST, README, DESIGN)
+- Renamed (`MANIFEST.name`) to "!friends nearby" (the `!` sorts it to the top of
+  the launcher).
+- Layout: **name** (`font_montserrat_28`, single line, marquee-scrolls when too
+  long) at the top; **group(s)** as full-width coloured pills (per-group signature
+  colour, stacked vertically, each scrolls if its name is too long); a
+  **friends line** (`Friends nearby: <names>` or `looking for friends…`); battery
+  (inset from the rounded corner); controls at the bottom. The group **logo**
+  (decode broken on this build) and the earlier breathing avatar disc were dropped.
+- **A** opens a friends-nearby panel (cards: colour dot · name · shared group ·
+  signal bars · dBm · age). **B** = mute/unmute (persisted to config; the controls
+  label reflects the state). **X** = OS quit. **START** unused.
+- New config keys: `sound` (bool), `banner_ms` (ms, default 5000), `board`
+  (optional "2024"/"2026" override).
+
+## Fri3d 2026 badge support
+- Board autodetect (`mpos.DeviceInfo.get_hardware_id()` → `"fri3d_2026"`, fallback
+  `mpos.io_expander.version`); 2026 reads A/B via the **CH32X035 I²O expander**
+  (`mpos.io_expander.digital` idx A=7, B=6), uses **320×240**, buzzer **GPIO38**,
+  and re-enables the backlight via `io_expander.lcd_brightness`. LEDs/battery via
+  `mpos` (portable). Screen size comes from `mpos.DisplayMetrics`. (2026 runtime
+  not yet verified — the 2026 badge was in active use / off-limits.)
+
+## Hard-won bugs found & fixed
+- **lvgl long-mode enum** is `lv.label.LONG_MODE.SCROLL_CIRCULAR` — **not**
+  `lv.label.LONG.*` (which doesn't exist on this build). The wrong name silently
+  no-op'd, so long names wrapped to a second line.
+- This build has **`add_flag`/`remove_flag` but no `clear_flag`** (already in
+  DESIGN §1 — I re-tripped it): using `clear_flag` to show the A-panel silently
+  raised + was swallowed by `try/except`, so the panel never appeared.
+- **Buttons** (2024): A=GPIO39, B=GPIO40 (raw GPIO, active-low; **no** LVGL key
+  events on 2024), X = OS "back"/quit. Confirmed with a throwaway on-screen
+  input-test app. 2026 equivalents via the expander (see DESIGN §7).
+- **CPU starvation**: a **2× transform-scale on the scrolling name** made lvgl
+  re-render + re-scale it every animation frame, swamping the CPU → asyncio loop
+  starved (button polls missed, arrival chime audibly stretched) and eventually the
+  USB-REPL locked up. Fixed by rendering the name at `font_montserrat_28` (no
+  transform scale). Also reduced per-tick lvgl re-renders to "only when the text
+  actually changes".
+
+## Verification
+- 30/30 `pytest tests/` (untouched).
+- On-device (2024 badge): name scrolls on one line, 2 group pills show in full,
+  A expands/closes the panel, B mutes+persists (label flips), X quits, chime is
+  crisp, and the USB-REPL stays responsive under load.
+
+---
+
 # Group Nametag + Proximity Finder — screenshot-capture investigation — 2026-07-10
 
 Attempted to capture a still screenshot of the running app on a configured badge

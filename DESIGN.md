@@ -64,6 +64,17 @@ Consequences (all verified by probe — see `probes/`):
   **`iSerial`** (`ID_SERIAL_SHORT`), never by `/dev/ttyACMx` (unstable) or VID:PID
   (ambiguous). Lilygo TTGOs are trivially separate (`1a86:55d4`). Always address the
   target via `/dev/serial/by-id/…<serial>…`.
+- **lvgl label long-mode** enum is `lv.label.LONG_MODE.SCROLL_CIRCULAR` (etc.) —
+  there is **no** `lv.label.LONG.*` on this build; the wrong name silently no-ops
+  (label falls back to WRAP).
+- **Don't `transform_scale` a scrolling label:** a scaled scrolling label forces
+  lvgl to re-render + re-scale every animation frame, which starves the CPU (missed
+  button polls, a stretched asyncio buzzer chime) and can lock up the USB-REPL. Use
+  the largest built-in font directly (`font_montserrat_28`).
+- **2024 buttons (verified 2026-07-11):** A=GPIO39, B=GPIO40 (raw, active-low,
+  pull-up — **no** LVGL key events on the 2024 badge); X = the OS "back"/quit. Read
+  A/B via raw `Pin` polling; let X fall through to the OS. (`clear_flag` does not
+  exist — use `remove_flag` to un-hide.)
 - mpremote `run`/`exec` does **not** soft-reset; `sys.modules` is cached between
   runs — bust the cache (`del sys.modules[m]`) when iterating on uploaded code.
 
@@ -209,5 +220,33 @@ does not depend on the exact number, only on "roughly same area."**
 
 ## 6. Remaining out-of-scope items (PLAN §11)
 
-- Animated-GIF logos / scan-response name extension / persisted mute remain out
-  of scope.
+- Animated-GIF logos / scan-response name extension remain out of scope.
+  (Persisted mute is now implemented — `sound` config key, toggled with B.)
+
+## 7. 2024 vs 2026 badge support
+
+The app runs on both the Fri3d Camp 2024 and 2026 badges (both ESP32-S3 +
+MicroPythonOS). Hardware differences are abstracted in `group_nametag.py` and
+selected at runtime. **Board detect:** `mpos.DeviceInfo.get_hardware_id()` →
+`"fri3d_2026"` (fallback: `mpos.io_expander.version` exists only on 2026); a
+config `"board"` key overrides autodetect. Screen size comes from
+`mpos.DisplayMetrics` (2024: 296×240, 2026: 320×240).
+
+| | 2024 | 2026 |
+|---|---|---|
+| Buttons A/B/X/Y/MENU | direct GPIO 39/40/38/41/45 (active-low, pull-up) | **CH32X035 I²C expander** `mpos.io_expander.digital` idx A=7, B=6, X=9, Y=8, MENU=5 (active-high) |
+| START | GPIO 0 (active-low) | GPIO 0 (same) |
+| Buzzer | GPIO 46 (PWM) | **GPIO 38** (PWM) — note GPIO38 is button-X on 2024 |
+| LEDs / battery | `mpos.lights` / `mpos.BatteryManager` | same (portable) |
+| Backlight (dim) | none (no API → dim is a no-op) | **yes** via `mpos.io_expander.lcd_brightness` (0-100; dim re-enabled) |
+| X button | app reads GPIO38 (but OS also uses X = back) | OS = ESC/quit; **app does not bind X** (B is mute, START exits) |
+
+The app only binds **A** (panel), **B** (mute), **START** (exit) — read via the
+single `_held(name)` chokepoint which branches on `self._is_2026` (raw `Pin` poll
+on 2024, `io_expander.digital` on 2026, START=Pin(0) on both). **X is left to the
+OS** (quit) on both badges. Source for the 2026 pinout: the local
+`fri3d-badge-2026-developer-guide.md` + `fri3d-badge-hwtest/.../hwtest.py`
+(authoritative `fri3d_2026.py` board module + live USB reads); the public
+badge_2026 docs describe the CH32X035 conceptually but give no pin table. The 2026
+path is **implemented but not yet runtime-verified** by the author (the 2026 badge
+was in active use / off-limits during development).

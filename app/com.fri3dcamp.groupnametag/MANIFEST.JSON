@@ -1,10 +1,10 @@
 {
-  "name": "Group Nametag",
+  "name": "!friends nearby",
   "publisher": "Fri3d Camp",
-  "short_description": "Animated group nametag + BLE proximity finder",
-  "long_description": "Shows your group logo and name, and quietly alerts you when someone from one of your groups comes within Bluetooth range. Generic: any group sets its own name(s), member, and logo by editing config.json and replacing logo.png.",
+  "short_description": "Animated nametag + BLE group proximity finder",
+  "long_description": "Shows your name and your group(s), and quietly alerts you when someone sharing one of your groups comes within Bluetooth range. Nearby friends appear as cards with signal strength. Generic: any group sets its own name(s) and member by editing config.json.",
   "fullname": "com.fri3dcamp.groupnametag",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "category": "utilities",
   "activities": [
     {

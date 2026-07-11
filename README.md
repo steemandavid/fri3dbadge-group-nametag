@@ -1,16 +1,16 @@
-# Group Nametag + BLE Proximity Finder
+# !friends nearby — Group Nametag + BLE Proximity Finder
 
 A MicroPythonOS app for the **Fri3d Camp 2024 badge** that does two things:
 
-1. **Animated nametag** — shows your group's logo and your name, with a gentle
-   breathing animation.
+1. **Animated nametag** — shows your name large (it scrolls if too long), with
+   your group(s) as coloured pills (the colour is unique to each group).
 2. **Proximity finder** — over Bluetooth Low Energy, it detects other badges
    running this app that share **at least one group** with you, and alerts you
    when one comes within radio range ("someone from my groups is nearby").
 
-It's **generic and redistributable**: any hackerspace/makerspace can flash it,
-set their own group name(s), member name, and logo — by editing one file and
-swapping one image, no code changes — and it finds *their* people.
+It's **generic and redistributable**: any hackerspace/makerspace can flash it and
+set their own group name(s) and member name by editing one file (no code changes)
+— and it finds *their* people.
 
 ## Install (on the badge)
 
@@ -23,7 +23,8 @@ mpremote connect /dev/ttyACM0 cp -r app/com.fri3dcamp.groupnametag :/apps/
 mpremote connect /dev/ttyACM0 reset
 ```
 
-After reboot, **Group Nametag** appears in the launcher. (If you added it without
+After reboot, **!friends nearby** appears at the top of the launcher (the `!`
+sorts it first). (If you added it without
 rebooting, run `AppManager.refresh_apps()` in the REPL or just reboot.)
 
 ## Configure (no code edits)
@@ -35,7 +36,9 @@ Edit **`/apps/com.fri3dcamp.groupnametag/config.json`**:
   "groups": ["Makerspace Baasrode"],
   "name": "Alex",
   "handle": "YOURCALL",
-  "rssi_floor": -120
+  "rssi_floor": -120,
+  "sound": true,
+  "banner_ms": 5000
 }
 ```
 
@@ -50,9 +53,17 @@ Edit **`/apps/com.fri3dcamp.groupnametag/config.json`**:
   badges that are close, e.g. `-80` (≈ same tent / ~10 m) or `-70` (≈ next to me).
   It's a noise/range filter, *not* fine calibration. See **DESIGN.md §5** for a
   fuller dBm→range guidance table and the open-field link-budget estimate.
+- **`sound`** — `true`/`false`, whether the arrival buzzer sting plays. Toggled
+  with **B** and **persisted** across reboots. Default `true`.
+- **`banner_ms`** — how long the "friend arrived" banner stays on screen, in ms.
+  Default `5000` (5 s).
+- **`board`** — optional, `"2024"` or `"2026"` to force the hardware profile
+  (otherwise auto-detected). Only needed if autodetection fails.
 
-Then **replace `logo.png`** with your group's logo (PNG or JPEG; keep it ≲300×300
-and ≲150 KB; non-square is fine — it's auto-fit and centred). Reboot.
+> Note: the screen shows your group(s) as **coloured pills** (colour derived from
+> the group name) — there's no logo image to swap. The bundled `logo.png` is not
+> displayed. The app runs on **both the Fri3d 2024 and 2026 badges** (auto-detected;
+> force with the `board` key above).
 
 > **First-run / unconfigured:** if `name` is empty or `groups` is empty, the
 > badge shows a "Configure me" hint and **does not advertise or scan** — safer
@@ -62,18 +73,22 @@ and ≲150 KB; non-square is fine — it's auto-fit and centred). Reboot.
 
 | Button | Action |
 |---|---|
-| **A** | Toggle the nearby-list detail view (name · shared group · smoothed RSSI · age) |
-| **X** | Mute / unmute the alert buzzer |
-| **B** / **START** | Exit back to the launcher (the OS back gesture also works) |
+| **A** | Open the friends-nearby panel (cards: name · shared group · signal bars · dBm · age) |
+| **B** | Mute / unmute the alert buzzer (saved to config, survives reboot) |
+| **X** | *(handled by the OS)* quit to the launcher / OS menu |
+| **START** | *(unused)* |
 
-The idle screen shows: your name large across the top, your logo (breathing)
-below it, your handle (if set), your own group(s) so you can confirm who can find
-you, battery % (top-right), and the current "nearby: …" line. On a new arrival, a
-banner appears for ~2.5 s, the LEDs
+The idle screen shows: your **name** large across the top (it scrolls if too
+long), your **group(s)** as coloured pills directly under it, battery %
+(top-right, inset from the rounded corner), and a **friends line** —
+`Friends nearby: Alice, Bob` when peers are in range, or `looking for friends…`
+when none. On a new arrival, a banner appears for ~5 s (`banner_ms`), the LEDs
 flash, and a short buzzer sting plays — with a **colour + tone unique to the
 shared group** (derived from the group hash, so you can recognise *which* group
-just arrived without reading the screen). Several arrivals in one window
-coalesce into one banner ("Alice + 2 more nearby").
+just arrived without reading the screen). Several arrivals in one window coalesce
+into one banner ("Alice + 2 more nearby"). Press **A** for a per-friend panel
+(name, shared group, signal bars, dBm, seconds since last seen); press **B** to
+mute.
 
 ## How matching works (short version)
 
