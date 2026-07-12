@@ -1094,19 +1094,15 @@ class GroupNametag(Activity):
         self._reload_pending = True
 
     def _apply_reload(self):
-        self._load_config()
-        if self._name_lbl is not None:
-            try:
-                self._name_lbl.set_text(self._config.get("name", ""))
-            except Exception:
-                pass
-        if self._controls_lbl is not None:
-            try:
-                self._controls_lbl.set_text(self._controls_text())
-            except Exception:
-                pass
+        # Don't rebuild the screen underneath a live exchange window; retry after.
         if self._exchanging:
+            self._reload_pending = True
             return
+        self._load_config()
+        # Rebuild the whole idle screen so the group PILLS (and the
+        # configured/unconfigured layout) reflect the new config — not just the
+        # name. Pills are built once in _build_idle, so a live edit needs a rebuild.
+        self._rebuild_screen()
         # Re-apply the on-air beacon (name/groups) after an edit.
         try:
             self._ble.end()
@@ -1118,3 +1114,28 @@ class GroupNametag(Activity):
                                 self._config["handle"], self._config["rssi_floor"])
             except Exception:
                 pass
+
+    def _rebuild_screen(self):
+        old = self._scr
+        try:
+            self._scr = lv.obj()
+            self._build_idle(self._scr)
+            if self._entered:
+                self.setContentView(self._scr)
+        except Exception:
+            self._scr = old        # keep the working screen if the rebuild failed
+            return
+        if old is not None and old is not self._splash_scr:
+            try:
+                old.delete()
+            except Exception:
+                pass
+        # Reset per-label caches so the refreshers repopulate the fresh widgets.
+        self._friends_last = None
+        self._batt_last = None
+        self._clock_last = None
+        self._portal_last = None
+        self._detail_header_last = None
+        self._detail = False
+        self._banner_until = 0
+        self._alert_names = []
