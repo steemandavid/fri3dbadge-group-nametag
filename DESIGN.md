@@ -261,11 +261,31 @@ was in active use / off-limits during development).
   bytes ...}))` (asset `makerspace.png`, copied from `org.fri3d.hwtest`) — this is
   reliable, unlike the `set_src("S:/…")` path (§1). Text fallback if the asset is
   missing. **Verified on the 2024 badge** (splash then nametag, no wedge).
-- **Clock**: top-left label in the same font/colour as the battery % (`_refresh_
-  clock`, `HH:MM`, updated ~1/s). Time comes from the RTC, kept accurate by NTP:
+- **Clock**: top-left label in the same font/colour as the battery %
+  (`_refresh_clock`, `HH:MM`, updated ~1/s), inset to `CLOCK_X=24` so the curved
+  screen corner doesn't clip it. Time comes from the RTC, kept accurate by NTP:
   MicroPythonOS syncs on WiFi connect, and `_resync_time` re-syncs ~every 10 min
-  (`ntptime.settime()` in a task, only when `WifiService.is_connected()`).
-  **Verified**: the running badge showed the correct wall-clock time (`10:13`).
+  (`ntptime.settime()`, only when `WifiService.is_connected()`). The first
+  app-driven resync is deferred (the OS already synced at connect) so the
+  **blocking** `settime()` never hitches launch. **Verified**: running badges
+  showed correct wall-clock time.
+
+## 11. Friend LEDs — per-friend breathing (v0.4.0)
+
+Each nearby friend gets one RGB LED, slowly + dimly **breathing that friend's
+group colour** (friend 1 → LED 0, friend 2 → LED 1, …; the rest off). Driven by
+`_update_leds(now)` in the main loop (every `LED_UPDATE_MS=60`):
+- LED count is **board-keyed**: **4 on 2024, 5 on 2026** (`_led_count()`) — the
+  firmware `get_led_count()` over-reports 5 on the 2024, which physically has 4.
+- Colour = the peer's shared-group signature (`_sig_from_id`→`_hsv`, same hue as
+  the on-screen pill), scaled by a slow cosine breathe between `LED_DIM_MIN=0.015`
+  and `LED_DIM_MAX=0.18` over `LED_BREATHE_MS=3800`, with a per-LED phase stagger
+  so they don't pulse in lockstep. Frame-cached to skip redundant `lights.write()`.
+- Arrival/exchange flashes (`_flash_leds`) set a short `LED_FLASH_MS` override;
+  breathing resumes automatically afterward.
+- **Verified on the 2026 badge**: with 2 co-located friends, LEDs 0+1 breathed the
+  dim green Makerspace-Baasrode colour, animating (green channel ~3↔44/255) and
+  phase-staggered; LEDs 2–4 off. The 2024 path (4 LEDs) uses the identical logic.
 
 ## 9. Contact exchange — Y button (`contact_exchange.py`)
 

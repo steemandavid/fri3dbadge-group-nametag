@@ -1,3 +1,38 @@
+# !friends nearby — friend LEDs, clock inset, 2026 verified on hardware — 2026-07-12
+
+Follow-up to the splash/swap/portal work below. Added **per-friend breathing
+LEDs**, nudged the clock clear of the curved corner, deferred the launch-time NTP
+sync, and **verified the app end-to-end on a Fri3d 2026 badge** (first on-hardware
+2026 run). Also fixed the live-save group-pill refresh (see prior commit).
+
+## Friend LEDs (per-friend breathing)
+- One RGB LED per nearby friend, slowly + dimly breathing that friend's **group
+  colour** (friend 1 → LED 0, …). `_update_leds` in the loop, `LED_UPDATE_MS=60`,
+  breathe `LED_DIM_MIN..MAX 0.015..0.18` over `3800 ms`, per-LED phase stagger,
+  frame-cached writes. LED count is board-keyed: **4 on 2024, 5 on 2026** (fw
+  `get_led_count()` over-reports 5 on 2024). Arrival/exchange flashes set a short
+  override, then breathing resumes.
+
+## Clock + NTP
+- Clock inset to `CLOCK_X=24` (2 chars right) so the curved screen corner no longer
+  clips it. First app-driven NTP resync deferred one interval (OS already syncs at
+  WiFi connect) so the blocking `ntptime.settime()` doesn't hitch launch.
+
+## Fri3d 2026 — on-hardware verification (badge serial 1cdbd49d9de4)
+- Fresh install on the 2026; **works**: splash → nametag (320×240), board detected
+  `fri3d_2026`, BLE proximity detected both 2024 badges, clock/pills/portal footer/
+  controls render, io_expander buttons (A/B/Y) read cleanly, and **friend LEDs
+  breathed** (2 friends → LEDs 0+1 dim-green, animated + staggered). No 2026 bugs
+  found — worked on first deploy.
+
+## Meta
+- Added a shared cross-project USB device reference at
+  `/home/john/claudecode/fri3d-usb-devices.md` (serials/by-id paths for both 2024
+  badges, the 2026, and the 2 TTGOs, + 2024-vs-2026 identify recipe + wedge
+  recovery). The 2026 badge is now an active dev/test target.
+
+---
+
 # !friends nearby — splash, contact swap (Y), WiFi setup portal + clock — 2026-07-12
 
 Added a startup splash, a **contact-exchange** feature on the **Y** button, a

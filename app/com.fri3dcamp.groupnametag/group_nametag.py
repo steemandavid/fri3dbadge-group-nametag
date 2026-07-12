@@ -89,11 +89,21 @@ NAME_W = W - 60
 BATT_X = W - 72
 BATT_Y = 8
 
-# Live clock: top-LEFT, same font/colour as the battery % (top-right).
-CLOCK_X = 8
+# Live clock: top-LEFT, same font/colour as the battery % (top-right). Inset ~2
+# chars from the edge so the curved screen corner doesn't clip it.
+CLOCK_X = 24
 CLOCK_Y = 8
 
 NTP_RESYNC_MS = 10 * 60 * 1000    # keep the RTC NTP-synced ~every 10 min on WiFi
+
+# Friend LEDs: one RGB LED per nearby friend, slowly + dimly breathing that
+# friend's group colour. 2024 badge has 4 physical LEDs, 2026 has 5 (firmware
+# get_led_count() reports 5 on both, so key off the board).
+LED_BREATHE_MS = 3800             # one full breathe cycle
+LED_DIM_MIN = 0.015               # min brightness fraction (nearly off at trough)
+LED_DIM_MAX = 0.18                # max brightness fraction (dim peak)
+LED_UPDATE_MS = 60                # LED refresh cadence (smooth enough for a slow breathe)
+LED_FLASH_MS = 900                # arrival/exchange flash holds this long before breathing resumes
 
 # Group pills: full width, stacked vertically, below the name.
 PILL_MARGIN_X = 16
@@ -195,6 +205,9 @@ class GroupNametag(Activity):
         self._finishing = False
         self._buzzer = None
         self._dimmed = False
+        self._led_next_ms = 0
+        self._led_override_until = 0
+        self._led_last = None
         self._batt_next_ms = 0
         self._name_lbl = None
         self._batt_lbl = None
@@ -717,19 +730,52 @@ class GroupNametag(Activity):
         TaskManager.create_task(self._sting(freq))
 
     def _flash_leds(self, r, g, b):
+        # A brief bright flash on all LEDs; the per-friend breathing (below)
+        # resumes automatically once the override window elapses.
         try:
-            n = lights.get_led_count()
+            n = self._led_count()
             for i in range(n):
                 lights.set_led(i, r, g, b)
             lights.write()
-            TaskManager.create_task(self._leds_off_after(900))
+            self._led_override_until = time.ticks_add(time.ticks_ms(), LED_FLASH_MS)
+            self._led_last = None       # force a breathing redraw after the flash
         except Exception:
             pass
 
-    async def _leds_off_after(self, ms):
-        await asyncio.sleep_ms(ms)
+    # ---- per-friend breathing LEDs ----
+    def _led_count(self):
+        # 4 physical LEDs on 2024, 5 on 2026 (get_led_count() over-reports 5 on 2024).
+        return 5 if self._is_2026 else 4
+
+    def _update_leds(self, now):
+        # One LED per nearby friend, slowly + dimly breathing that friend's group
+        # colour (friend 1 -> LED 0, friend 2 -> LED 1, ...). Others off.
+        if time.ticks_diff(now, self._led_next_ms) < 0:
+            return
+        self._led_next_ms = time.ticks_add(now, LED_UPDATE_MS)
+        if self._led_override_until and time.ticks_diff(now, self._led_override_until) < 0:
+            return                      # a flash is currently showing
+        n = self._led_count()
+        peers = [] if self._unconfigured else self._ble.current_peers()
+        frame = []
+        span = LED_DIM_MAX - LED_DIM_MIN
+        for i in range(n):
+            if i < len(peers):
+                gid = peers[i][2]
+                hue, _ = _sig_from_id(gid if gid is not None else 0)
+                r, g, b = _hsv(hue, s=0.9, v=1.0)
+                # gentle per-LED phase stagger so they don't pulse in lockstep
+                phase = (now + i * (LED_BREATHE_MS // max(1, n))) % LED_BREATHE_MS
+                s = LED_DIM_MIN + span * (0.5 - 0.5 * math.cos(2 * math.pi * phase / LED_BREATHE_MS))
+                frame.append((int(r * s), int(g * s), int(b * s)))
+            else:
+                frame.append((0, 0, 0))
+        if frame == self._led_last:     # skip redundant writes (e.g. all-off)
+            return
+        self._led_last = frame
         try:
-            lights.clear()
+            for i, (r, g, b) in enumerate(frame):
+                lights.set_led(i, r, g, b)
             lights.write()
         except Exception:
             pass
@@ -751,6 +797,9 @@ class GroupNametag(Activity):
         self._t0 = time.ticks_ms()
         self._last_input_ms = time.ticks_ms()
         self._dimmed = False
+        # The OS already NTP-syncs on WiFi connect; defer our first resync so the
+        # (blocking) ntptime.settime() call never hitches app launch.
+        self._next_ntp_ms = time.ticks_add(time.ticks_ms(), NTP_RESYNC_MS)
         self._set_brightness(255)
         if not self._unconfigured:
             try:
@@ -769,6 +818,12 @@ class GroupNametag(Activity):
         self._stop_portal()
         self._teardown_ble()
         self._set_brightness(255)
+        self._led_last = None
+        try:
+            lights.clear()
+            lights.write()
+        except Exception:
+            pass
 
     def onStop(self, screen):
         self._stop_task()
@@ -827,6 +882,7 @@ class GroupNametag(Activity):
                 self._ble.tick(now, dt)
                 self._drain_arrivals()
                 self._refresh_nearby()
+                self._update_leds(now)
                 self._refresh_battery(now)
                 self._refresh_clock(now)
                 self._refresh_portal(now)
