@@ -237,8 +237,10 @@ class ContactExchange:
     """
 
     def __init__(self):
+        self.dbg = []            # trace of the last run_window (for diagnostics)
         self._ble = None
         self._svc_ready = False
+        self._mtu_set = False    # config(mtu=) is one-time-only; re-setting EINVALs
         self._h_myinfo = None
         self._h_theirs = None
         # event constants seeded in run_window()
@@ -341,6 +343,7 @@ class ContactExchange:
         self._received = None
         self._got_write = False
         self._done = False
+        self.dbg = ["start"]
 
         envelope = build_contact_envelope(my_name, my_contact)
 
@@ -352,19 +355,44 @@ class ContactExchange:
 
         result = None
         try:
-            self._ble = bluetooth.BLE()
+            # Every setup call is individually guarded: several of these are
+            # one-time-only on NimBLE (notably config(mtu=) and gatts_register_
+            # services), and re-issuing them on a 2nd exchange raises OSError(22)
+            # EINVAL. Guarding + one-shot flags makes run_window fully re-entrant
+            # (previously the exchange worked once per launch, then EINVAL'd).
             try:
-                self._ble.active(True)
-            except Exception:
-                pass
+                self._ble = bluetooth.BLE()
+            except Exception as e:
+                self.dbg.append("BLE-exc %r" % e)
+                self._ble = None
+            if self._ble is None:
+                return None
+            self.dbg.append("BLE()")
             try:
-                self._ble.config(mtu=GATT_MTU)
-            except Exception:
-                pass
+                if not self._ble.active():
+                    self._ble.active(True)
+            except Exception as e:
+                self.dbg.append("active-exc %r" % e)
+            if not self._mtu_set:
+                try:
+                    self._ble.config(mtu=GATT_MTU)
+                    self._mtu_set = True
+                except Exception as e:
+                    self.dbg.append("mtu-exc %r" % e)
             self._seed_events(bluetooth)
-            self._ble.irq(self._irq)
-            self._ensure_service(bluetooth)
-            self._ble.gatts_write(self._h_myinfo, envelope)
+            try:
+                self._ble.irq(self._irq)
+            except Exception as e:
+                self.dbg.append("irq-exc %r" % e)
+            try:
+                self._ensure_service(bluetooth)
+            except Exception as e:
+                self.dbg.append("svc-exc %r" % e)
+            try:
+                self._ble.gatts_write(self._h_myinfo, envelope)
+            except Exception as e:
+                self.dbg.append("write-exc %r" % e)
+            self.dbg.append("setup h=%s/%s" % (self._h_myinfo, self._h_theirs))
 
             my_mac = self._my_mac()
             nonce = (time.ticks_ms() & 0xFFFF)
@@ -380,13 +408,16 @@ class ContactExchange:
             except Exception:
                 pass
 
+            self.dbg.append("setup+adv+scan")
             deadline = time.ticks_add(time.ticks_ms(), WINDOW_MS)
             # Phase 1: rendezvous — wait for a peer beacon (or an inbound connect).
             while (time.ticks_diff(deadline, time.ticks_ms()) > 0 and
                    self._peer is None and self._conn is None):
                 await asyncio.sleep_ms(30)
 
+            self.dbg.append("rv peer=%s conn=%s" % (self._peer is not None, self._conn))
             if self._peer is None and self._conn is None:
+                self.dbg.append("no-peer")
                 return None     # nobody else was swapping
 
             # Decide our role from the two addresses (unless already connected to).
@@ -395,6 +426,7 @@ class ContactExchange:
             else:
                 peer_addr = self._peer[1]
                 self._role = decide_role(my_mac, peer_addr)
+            self.dbg.append("role=%s" % self._role)
 
             if self._role == "client":
                 try:
@@ -414,9 +446,11 @@ class ContactExchange:
                 except Exception:
                     pass
                 result = await self._run_server(bluetooth, time, asyncio, deadline)
-        except Exception:
+        except Exception as e:
+            self.dbg.append("EXC %r" % e)
             result = None
         finally:
+            self.dbg.append("ret=%s" % (result is not None))
             self._teardown_window()
             try:
                 proximity.resume()
@@ -428,6 +462,7 @@ class ContactExchange:
         # Wait for the peer to write its envelope (or the connection to end).
         while time.ticks_diff(deadline, time.ticks_ms()) > 0 and not self._got_write:
             await asyncio.sleep_ms(30)
+        self.dbg.append("srv got_write=%s conn=%s" % (self._got_write, self._conn))
         # Give the client a moment to finish its read, then drop the link.
         await asyncio.sleep_ms(150)
         if self._conn is not None:
@@ -441,11 +476,13 @@ class ContactExchange:
         peer_addr_type, peer_addr = self._peer[0], self._peer[1]
         try:
             self._ble.gap_connect(peer_addr_type, peer_addr)
-        except Exception:
+        except Exception as e:
+            self.dbg.append("connect-exc %r" % e)
             return None
         # Wait for connection.
         while time.ticks_diff(deadline, time.ticks_ms()) > 0 and self._conn is None:
             await asyncio.sleep_ms(20)
+        self.dbg.append("cli conn=%s" % self._conn)
         if self._conn is None:
             return None
         try:
@@ -458,16 +495,18 @@ class ContactExchange:
         self._h_write_remote = None
         self._disc = {"chars": []}
         found = await self._discover_client(bluetooth, time, asyncio, deadline)
+        self.dbg.append("cli disc=%s r=%s w=%s" % (found, self._h_read_remote, self._h_write_remote))
         if not found:
             self._safe_disconnect()
             return None
         # Read the server's MYINFO, then write our envelope to THEIRS.
         try:
             self._ble.gattc_read(self._conn, self._h_read_remote)
-        except Exception:
-            pass
+        except Exception as e:
+            self.dbg.append("read-exc %r" % e)
         while time.ticks_diff(deadline, time.ticks_ms()) > 0 and self._received is None:
             await asyncio.sleep_ms(20)
+        self.dbg.append("cli recv=%s" % (self._received is not None))
         try:
             self._ble.gattc_write(self._conn, self._h_write_remote, envelope, 1)
         except Exception:

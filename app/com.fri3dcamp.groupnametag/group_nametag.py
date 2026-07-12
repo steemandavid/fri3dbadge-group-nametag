@@ -1022,9 +1022,16 @@ class GroupNametag(Activity):
         if not self._wifi_connected():
             return
         self._ntp_busy = True
-        TaskManager.create_task(self._ntp_sync())
+        # ntptime.settime() is a BLOCKING network call — run it in a thread so it
+        # never freezes the asyncio loop (which would stall the UI / an in-flight
+        # contact exchange). Fall back to a task if _thread is unavailable.
+        try:
+            import _thread
+            _thread.start_new_thread(self._ntp_blocking, ())
+        except Exception:
+            TaskManager.create_task(self._ntp_sync())
 
-    async def _ntp_sync(self):
+    def _ntp_blocking(self):
         try:
             import ntptime
             ntptime.settime()
@@ -1032,6 +1039,9 @@ class GroupNametag(Activity):
             pass
         finally:
             self._ntp_busy = False
+
+    async def _ntp_sync(self):
+        self._ntp_blocking()
 
     @staticmethod
     def _wifi_connected():
@@ -1042,13 +1052,25 @@ class GroupNametag(Activity):
             return False
 
     # ------------------------------------------------------------------ contact exchange
+    def _exch_log(self, msg):
+        try:
+            with open(APP_DIR + "/exch.log", "a") as f:
+                f.write(msg + "\n")
+        except Exception:
+            pass
+
     async def _do_exchange(self):
         self._exchanging = True
+        t0 = time.ticks_ms()
         try:
             self._show_banner("Swapping contacts…")
             self._wake()
             name = self._config.get("name", "") or "Anonymous"
             rec = await self._exch.run_window(self._ble, name, self._contact)
+            self._exch_log("%s board=%s %dms rec=%r trace=%s" % (
+                _now_str(), "2026" if self._is_2026 else "2024",
+                time.ticks_diff(time.ticks_ms(), t0), rec,
+                " | ".join(self._exch.dbg)))
             if rec:
                 rec["received_at"] = _now_str()
                 try:
