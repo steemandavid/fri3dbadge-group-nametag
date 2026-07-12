@@ -35,6 +35,41 @@ from ble_proximity import (
     BLEProximity, build_own_table, hash_groups, fnv1a_16,
     EVICT_MS, RSSI_FLOOR_DEFAULT,
 )
+from contact_exchange import ContactExchange, merge_received
+from web_portal import WebPortal
+
+FULLNAME = "com.fri3dcamp.groupnametag"
+
+
+def _read_version():
+    """Read this app's version from its MANIFEST.JSON ('?' if not found)."""
+    for base in ("/apps", "/builtin/apps"):
+        try:
+            with open(base + "/" + FULLNAME + "/MANIFEST.JSON") as f:
+                return json.load(f).get("version", "?")
+        except Exception:
+            pass
+    return "?"
+
+
+def _asset_bytes(name):
+    """Read a binary asset from this app's folder (or builtin), or None."""
+    for base in ("/apps", "/builtin/apps"):
+        try:
+            with open(base + "/" + FULLNAME + "/" + name, "rb") as f:
+                return f.read()
+        except Exception:
+            pass
+    return None
+
+
+def _now_str():
+    """Local wall-clock as 'YYYY-MM-DDTHH:MM:SS' (accurate once NTP-synced)."""
+    try:
+        t = time.localtime()
+        return "%04d-%02d-%02dT%02d:%02d:%02d" % (t[0], t[1], t[2], t[3], t[4], t[5])
+    except Exception:
+        return ""
 
 try:
     W = mpos.DisplayMetrics.width()
@@ -54,6 +89,12 @@ NAME_W = W - 60
 BATT_X = W - 72
 BATT_Y = 8
 
+# Live clock: top-LEFT, same font/colour as the battery % (top-right).
+CLOCK_X = 8
+CLOCK_Y = 8
+
+NTP_RESYNC_MS = 10 * 60 * 1000    # keep the RTC NTP-synced ~every 10 min on WiFi
+
 # Group pills: full width, stacked vertically, below the name.
 PILL_MARGIN_X = 16
 PILL_TOP = NAME_TOP + NAME_H_SCALED + 8     # clear of the scaled name
@@ -65,9 +106,9 @@ CONTROLS_TOP = H - 16
 
 # Button hardware (see DESIGN.md "2024 vs 2026").
 START_PIN = 0
-BTN_2024 = {"a": 39, "b": 40}             # direct GPIO (active-low, pull-up)
+BTN_2024 = {"a": 39, "b": 40, "y": 41}    # direct GPIO (active-low, pull-up)
 BTN_2024_DIAG = (0, 38, 39, 40, 41, 45)   # raw-GPIO pins logged for diagnostics
-BTN_2026_EXP = {"a": 7, "b": 6}           # mpos.io_expander.digital index (active-high)
+BTN_2026_EXP = {"a": 7, "b": 6, "y": 8}   # mpos.io_expander.digital index (active-high)
 BUZZER_PIN_2024 = 46
 BUZZER_PIN_2026 = 38
 
@@ -157,6 +198,21 @@ class GroupNametag(Activity):
         self._batt_next_ms = 0
         self._name_lbl = None
         self._batt_lbl = None
+        self._clock_lbl = None
+        self._clock_last = None
+        self._clock_next_ms = 0
+        self._next_ntp_ms = 0
+        self._ntp_busy = False
+        self._contact = {}
+        self._exch = ContactExchange()
+        self._exchanging = False
+        self._portal = None
+        self._portal_lbl = None
+        self._portal_last = None
+        self._reload_pending = False
+        self._splash_scr = None
+        self._splash_task = None
+        self._entered = False
         self._pills = []
         self._friends_lbl = None
         self._friends_top = PILL_TOP
@@ -198,6 +254,11 @@ class GroupNametag(Activity):
             self._banner_ms = int(cfg.get("banner_ms", BANNER_MS_DEFAULT))
         except (TypeError, ValueError):
             self._banner_ms = BANNER_MS_DEFAULT
+        contact = cfg.get("contact")
+        if not isinstance(contact, dict):
+            contact = {}
+        cfg["contact"] = contact
+        self._contact = contact
         self._config = cfg
         self._own_table = build_own_table(cfg["groups"])
         ids = [gid for _, gid in self._own_table]
@@ -350,7 +411,7 @@ class GroupNametag(Activity):
 
     def _controls_text(self):
         # "B:mute" while unmuted, "B:unmute" while muted.
-        return "A:list   B:%s   X:quit" % ("mute" if self._sound else "unmute")
+        return "A:list  B:%s  Y:swap" % ("mute" if self._sound else "unmute")
 
     # ------------------------------------------------------------------ pills (full width, stacked)
     def _place_pills(self, scr):
@@ -463,6 +524,72 @@ class GroupNametag(Activity):
         except Exception:
             pass
 
+    # ------------------------------------------------------------------ splash
+    def _build_splash(self):
+        # Mirrors the proven pattern in org.fri3d.hwtest: in-memory PNG decode
+        # (reliable, unlike set_src("S:/...")) with a text fallback.
+        sp = lv.obj()
+        sp.set_style_pad_all(0, 0)
+        sp.set_style_bg_color(_col(COL_BG), 0)
+        try:
+            sp.remove_flag(lv.obj.FLAG.SCROLLABLE)
+        except Exception:
+            pass
+
+        title = lv.label(sp)
+        title.set_text("!friends nearby")
+        title.set_style_text_color(_col(COL_NEAR), 0)
+        title.set_style_text_font(lv.font_montserrat_24, 0)
+        title.align(lv.ALIGN.TOP_MID, 0, 24)
+
+        ver = lv.label(sp)
+        ver.set_text("v" + _read_version())
+        ver.set_style_text_color(_col(COL_NONE), 0)
+        ver.set_style_text_font(lv.font_montserrat_14, 0)
+        ver.align(lv.ALIGN.TOP_MID, 0, 56)
+
+        who = lv.label(sp)
+        who.set_text("by David Steeman")
+        who.set_style_text_color(_col(COL_NAME), 0)
+        who.set_style_text_font(lv.font_montserrat_16, 0)
+        who.align(lv.ALIGN.TOP_MID, 0, 80)
+
+        logo = _asset_bytes("makerspace.png")
+        placed = False
+        if logo:
+            try:
+                li = lv.image(sp)
+                li.set_src(lv.image_dsc_t({"data_size": len(logo), "data": logo}))
+                li.align(lv.ALIGN.CENTER, 0, 24)
+                placed = True
+            except Exception:
+                placed = False
+
+        org = lv.label(sp)
+        org.set_text("Makerspace Baasrode")
+        org.set_style_text_color(_col(COL_BAR_ON), 0)
+        org.set_style_text_font(lv.font_montserrat_16, 0)
+        org.align(lv.ALIGN.BOTTOM_MID, 0, -20 if placed else -60)
+        return sp
+
+    async def _splash_then_enter(self):
+        try:
+            await asyncio.sleep_ms(3000)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            pass
+        self._enter_main()
+
+    def _enter_main(self):
+        if self._entered:
+            return
+        self._entered = True
+        try:
+            self.setContentView(self._scr)
+        except Exception:
+            pass
+
     # ------------------------------------------------------------------ UI build
     def _build_idle(self, scr):
         scr.set_style_bg_color(_col(COL_BG), 0)
@@ -470,10 +597,14 @@ class GroupNametag(Activity):
         cfg = self._config
 
         if self._unconfigured:
-            self._label(scr, 0, 70, "Configure me", COL_HINT, font=lv.font_montserrat_24, center=True)
-            self._label(scr, 0, 110, "edit  config.json", COL_NONE, font=lv.font_montserrat_16, center=True)
-            self._label(scr, 0, 134, "(set: name, groups)", COL_NONE, font=lv.font_montserrat_14, center=True)
-            self._label(scr, 0, 205, "BLE off until configured", COL_BATT, font=lv.font_montserrat_14, center=True)
+            self._label(scr, 0, 60, "Configure me", COL_HINT, font=lv.font_montserrat_24, center=True)
+            self._label(scr, 0, 100, "open the WiFi setup", COL_NONE, font=lv.font_montserrat_16, center=True)
+            self._label(scr, 0, 124, "portal (URL below)", COL_NONE, font=lv.font_montserrat_16, center=True)
+            self._label(scr, 0, 150, "set: name, groups", COL_NONE, font=lv.font_montserrat_14, center=True)
+            self._clock_lbl = self._label(scr, CLOCK_X, CLOCK_Y, "--:--", COL_BATT,
+                                          font=lv.font_montserrat_14)
+            self._portal_lbl = self._label(scr, 0, CONTROLS_TOP - 14, "", COL_BATT,
+                                           font=lv.font_montserrat_12, center=True)
             self._controls_lbl = self._label(scr, 0, CONTROLS_TOP, self._controls_text(),
                                              COL_NONE, font=lv.font_montserrat_12, center=True)
             return
@@ -490,12 +621,20 @@ class GroupNametag(Activity):
 
         self._batt_lbl = self._label(scr, BATT_X, BATT_Y, "--%", COL_BATT, font=lv.font_montserrat_14)
 
+        # Live clock: top-left, same font/colour as the battery %.
+        self._clock_lbl = self._label(scr, CLOCK_X, CLOCK_Y, "--:--", COL_BATT,
+                                      font=lv.font_montserrat_14)
+
         # Group pills (full width, stacked) -> sets self._friends_top.
         self._place_pills(scr)
 
         # Friends line directly under the pills.
         self._friends_lbl = self._label(scr, 0, self._friends_top, "looking for friends…",
                                         COL_NONE, font=lv.font_montserrat_14, center=True)
+
+        # Portal footer (URL, or a login-challenge PIN) directly above controls.
+        self._portal_lbl = self._label(scr, 0, CONTROLS_TOP - 14, "", COL_BATT,
+                                       font=lv.font_montserrat_12, center=True)
 
         # Controls (dynamic B label).
         self._controls_lbl = self._label(scr, 0, CONTROLS_TOP, self._controls_text(),
@@ -539,11 +678,15 @@ class GroupNametag(Activity):
 
     # ------------------------------------------------------------------ banner
     def _show_banner(self, text):
+        if self._banner is None or self._banner_bg is None:
+            return
         self._banner.set_text(text)
         self._banner_bg.remove_flag(lv.obj.FLAG.HIDDEN)
         self._banner_until = time.ticks_add(time.ticks_ms(), self._banner_ms)
 
     def _hide_banner(self):
+        if self._banner_bg is None:
+            return
         self._banner_bg.add_flag(lv.obj.FLAG.HIDDEN)
         self._banner_until = 0
 
@@ -597,9 +740,11 @@ class GroupNametag(Activity):
         self._setup_buttons()
         self._setup_buzzer()
         self._setup_display()
+        # Build the nametag now but show the splash first; swap after 3 s.
         self._scr = lv.obj()
         self._build_idle(self._scr)
-        self.setContentView(self._scr)
+        self._splash_scr = self._build_splash()
+        self.setContentView(self._splash_scr)
 
     def onResume(self, screen):
         super().onResume(screen)
@@ -613,16 +758,21 @@ class GroupNametag(Activity):
                                 self._config["handle"], self._config["rssi_floor"])
             except Exception:
                 pass
+        self._start_portal()
+        if not self._entered and self._splash_task is None:
+            self._splash_task = TaskManager.create_task(self._splash_then_enter())
         self._task = TaskManager.create_task(self._loop())
 
     def onPause(self, screen):
         super().onPause(screen)
         self._stop_task()
+        self._stop_portal()
         self._teardown_ble()
         self._set_brightness(255)
 
     def onStop(self, screen):
         self._stop_task()
+        self._stop_portal()
         self._teardown_ble()
         try:
             lights.clear()
@@ -647,6 +797,12 @@ class GroupNametag(Activity):
             except Exception:
                 pass
             self._task = None
+        if self._splash_task is not None:
+            try:
+                self._splash_task.cancel()
+            except Exception:
+                pass
+            self._splash_task = None
 
     def _teardown_ble(self):
         try:
@@ -665,10 +821,16 @@ class GroupNametag(Activity):
                 self._handle_buttons()
                 if self._finishing:
                     break
+                if self._reload_pending:
+                    self._reload_pending = False
+                    self._apply_reload()
                 self._ble.tick(now, dt)
                 self._drain_arrivals()
                 self._refresh_nearby()
                 self._refresh_battery(now)
+                self._refresh_clock(now)
+                self._refresh_portal(now)
+                self._resync_time(now)
                 if self._banner_until and time.ticks_diff(now, self._banner_until) >= 0:
                     self._hide_banner()
                 if (self._has_backlight and not self._dimmed and
@@ -683,12 +845,15 @@ class GroupNametag(Activity):
             await asyncio.sleep_ms(TICK_MS)
 
     def _handle_buttons(self):
-        for name in ("a", "b"):
+        for name in ("a", "b", "y"):
             ev = self._edge(name)
             if not ev:
                 continue
             self._wake()
-            if ev == "b":
+            if ev == "y":
+                if not self._exchanging:
+                    TaskManager.create_task(self._do_exchange())
+            elif ev == "b":
                 self._sound = not self._sound
                 self._save_config("sound", self._sound)
                 self._flash_leds(*_hsv(0 if not self._sound else 120))
@@ -774,3 +939,182 @@ class GroupNametag(Activity):
             return "%d%%" % pct
         except Exception:
             return ""
+
+    # ------------------------------------------------------------------ clock + NTP
+    def _refresh_clock(self, now):
+        if self._clock_lbl is None or time.ticks_diff(now, self._clock_next_ms) < 0:
+            return
+        self._clock_next_ms = time.ticks_add(now, 1000)
+        try:
+            t = time.localtime()
+            txt = "%02d:%02d" % (t[3], t[4])
+        except Exception:
+            txt = "--:--"
+        if txt != self._clock_last:
+            try:
+                self._clock_lbl.set_text(txt)
+            except Exception:
+                pass
+            self._clock_last = txt
+
+    def _resync_time(self, now):
+        # Keep the RTC NTP-synced ~every 10 min while on WiFi (first tick tries
+        # immediately). ntptime.settime() briefly blocks, so run it in a task.
+        if self._ntp_busy or time.ticks_diff(now, self._next_ntp_ms) < 0:
+            return
+        self._next_ntp_ms = time.ticks_add(now, NTP_RESYNC_MS)
+        if not self._wifi_connected():
+            return
+        self._ntp_busy = True
+        TaskManager.create_task(self._ntp_sync())
+
+    async def _ntp_sync(self):
+        try:
+            import ntptime
+            ntptime.settime()
+        except Exception:
+            pass
+        finally:
+            self._ntp_busy = False
+
+    @staticmethod
+    def _wifi_connected():
+        try:
+            from mpos import WifiService
+            return bool(WifiService.is_connected())
+        except Exception:
+            return False
+
+    # ------------------------------------------------------------------ contact exchange
+    async def _do_exchange(self):
+        self._exchanging = True
+        try:
+            self._show_banner("Swapping contacts…")
+            self._wake()
+            name = self._config.get("name", "") or "Anonymous"
+            rec = await self._exch.run_window(self._ble, name, self._contact)
+            if rec:
+                rec["received_at"] = _now_str()
+                try:
+                    rec["received_ticks"] = time.ticks_ms()
+                except Exception:
+                    rec["received_ticks"] = 0
+                self._store_contact(rec)
+                self._flash_leds(*_hsv(180))
+                TaskManager.create_task(self._sting(660))
+                self._show_banner("Swapped with %s ✓" % (rec.get("name") or "?"))
+            else:
+                self._show_banner("No one swapping nearby")
+        except Exception:
+            try:
+                self._show_banner("Swap failed")
+            except Exception:
+                pass
+        finally:
+            self._exchanging = False
+
+    def _contacts_path(self):
+        return APP_DIR + "/contacts.json"
+
+    def _load_contacts(self):
+        try:
+            with open(self._contacts_path()) as f:
+                data = json.load(f)
+                return data if isinstance(data, list) else []
+        except Exception:
+            return []
+
+    def _store_contact(self, rec):
+        store = self._load_contacts()
+        merge_received(store, rec)
+        try:
+            with open(self._contacts_path(), "w") as f:
+                json.dump(store, f)
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------------ web portal
+    def _portal_ip(self):
+        try:
+            from mpos import WifiService
+            if not WifiService.is_connected():
+                return None
+            return WifiService.get_ipv4_address()
+        except Exception:
+            return None
+
+    def _start_portal(self):
+        if self._portal is not None:
+            return
+        try:
+            self._portal = WebPortal(APP_DIR, on_change=self._reload_config,
+                                     ip_getter=self._portal_ip)
+            self._portal.start()
+        except Exception:
+            self._portal = None
+
+    def _stop_portal(self):
+        if self._portal is not None:
+            try:
+                self._portal.stop()
+            except Exception:
+                pass
+            self._portal = None
+
+    def _refresh_portal(self, now):
+        if self._portal_lbl is None:
+            return
+        pin = None
+        try:
+            pin = self._portal.pending_pin() if self._portal else None
+        except Exception:
+            pin = None
+        if pin:
+            txt = "portal PIN: %s" % pin
+            col = COL_NEAR
+        else:
+            url = None
+            try:
+                url = self._portal.url() if self._portal else None
+            except Exception:
+                url = None
+            txt = ("⚙ " + url) if url else "⚙ WiFi not connected"
+            col = COL_BATT
+        if txt != self._portal_last:
+            try:
+                self._portal_lbl.set_text(txt)
+                self._portal_lbl.set_style_text_color(_col(col), 0)
+            except Exception:
+                pass
+            self._portal_last = txt
+
+    def _reload_config(self):
+        # Called from the portal (same asyncio loop). Defer the actual apply to
+        # the main loop so it never races the BLE tick / exchange window.
+        self._reload_pending = True
+
+    def _apply_reload(self):
+        self._load_config()
+        if self._name_lbl is not None:
+            try:
+                self._name_lbl.set_text(self._config.get("name", ""))
+            except Exception:
+                pass
+        if self._controls_lbl is not None:
+            try:
+                self._controls_lbl.set_text(self._controls_text())
+            except Exception:
+                pass
+        if self._exchanging:
+            return
+        # Re-apply the on-air beacon (name/groups) after an edit.
+        try:
+            self._ble.end()
+        except Exception:
+            pass
+        if not self._unconfigured:
+            try:
+                self._ble.begin(self._config["groups"], self._config["name"],
+                                self._config["handle"], self._config["rssi_floor"])
+            except Exception:
+                pass

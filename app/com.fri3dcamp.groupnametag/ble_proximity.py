@@ -283,6 +283,7 @@ class BLEProximity:
         self._next_rearm_ms = 0       # ticks_ms deadline to restart the continuous scan
         self._irq_scan_result = 5     # bluetooth._IRQ_SCAN_RESULT (seeded in begin)
         self._name = ""
+        self._suspended = False       # True while the contact-exchange window owns the radio
 
     # ---- lifecycle ----
     def begin(self, groups, name, handle="", rssi_floor=RSSI_FLOOR_DEFAULT):
@@ -337,9 +338,41 @@ class BLEProximity:
         self._arrivals = []
         self._pending = []
 
+    # ---- hand the radio to / take it back from the contact-exchange window ----
+    def suspend(self):
+        """Stop advertising + scanning (but keep BLE active) so the contact
+        exchange can take over the single adv set / IRQ handler. Idempotent."""
+        if not self._ble:
+            self._suspended = True
+            return
+        self._suspended = True
+        for fn in (lambda: self._ble.gap_scan(None),
+                   lambda: self._ble.gap_advertise(None)):
+            try:
+                fn()
+            except Exception:
+                pass
+
+    def resume(self):
+        """Reinstall the proximity IRQ + non-connectable beacon and re-arm the
+        dense scan after a contact-exchange window returns the radio."""
+        self._suspended = False
+        if not self._ble:
+            return
+        try:
+            self._ble.irq(self._irq)
+        except Exception:
+            pass
+        if self._adv is not None:
+            try:
+                self._ble.gap_advertise(ADV_MS * 1000, adv_data=self._adv, connectable=False)
+            except Exception:
+                pass
+        self._next_rearm_ms = 0        # re-arm the continuous scan on the next tick()
+
     # ---- continuous dense scan (called from UI loop each frame) ----
     def tick(self, now_ms, dt_ms):
-        if not self._active or not self._ble:
+        if not self._active or not self._ble or self._suspended:
             return
         from time import ticks_diff, ticks_add
         # Drain scan results captured by the IRQ and update the peer table on

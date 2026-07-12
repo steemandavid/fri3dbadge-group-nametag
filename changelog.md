@@ -1,3 +1,55 @@
+# !friends nearby — splash, contact swap (Y), WiFi setup portal + clock — 2026-07-12
+
+Added a startup splash, a **contact-exchange** feature on the **Y** button, a
+configurable free-form **`contact`** object, on-badge storage of received
+contacts with timestamps, a **PIN-gated WiFi web portal** to edit config /
+view+export contacts, and a live **NTP-synced clock**. Bumped to **v0.4.0**.
+Off-device tests: **56 passing** (30 BLE + 20 contact-exchange + 6 portal). On the
+2024 badge: splash → nametag verified, clock showed real time, portal footer
+rendered, clean exit (no wedge). Radio round-trip for the swap + the browser
+portal round-trip need a two-badge / on-WiFi setup — not yet run.
+
+## New: splash + clock (group_nametag.py, makerspace.png)
+- 3-second splash (app name, `v0.4.0`, "by David Steeman", Makerspace Baasrode
+  logo + name), mirroring `org.fri3d.hwtest`'s `_build_splash` — the **in-memory
+  `lv.image_dsc_t` decode** (reliable) with a text fallback; asset copied from the
+  hwtest project. `_splash_then_enter` swaps to the nametag after 3 s.
+- **Live clock** top-left, same font/colour as the battery %. RTC kept accurate by
+  NTP: MicroPythonOS syncs on WiFi connect, and `_resync_time` re-syncs ~every
+  10 min (`ntptime.settime()` in a task, guarded by `WifiService.is_connected()`).
+
+## New: contact exchange — Y button (contact_exchange.py)
+- Overlapping 5 s **press-triggered windows** (no synced clocks). Y opens a window
+  advertising a connectable `HXCG` beacon + scanning for peers doing the same.
+- **`decide_role`**: lower MAC = GATT server, higher = client → exactly one
+  connection. Bidirectional swap over one link (server's readable `MYINFO` char +
+  writable `THEIRS` char); MTU raised to 515; envelope `{"n":…,"c":{…}}` capped to
+  500 B (fields dropped last-first).
+- Coexists with proximity via new `BLEProximity.suspend()/resume()` (stop/restore
+  scan+adv + IRQ **without** `active(False)`, to avoid CDC-wedging churn).
+- **Storage:** `merge_received` → `contacts.json`, deduped by MAC (refresh + bump
+  `count`, keep `first_received`), capped at 200, each with `received_at`.
+
+## New: WiFi setup portal (web_portal.py)
+- Always-on `asyncio.start_server` HTTP portal (assumes the OS is already on WiFi;
+  no STA/hotspot management). Routes: `/` (config + dynamic `contact` editor),
+  `/save`, `/contacts`, `/contacts.json`. Pure `parse_form`/`form_to_config`
+  unit-tested.
+- **Auth:** random 5-digit PIN per boot shown on the badge as a login challenge,
+  session cookie after entry, lockout + PIN rotation after 5 wrong tries. Footer on
+  the nametag shows `⚙ http://<ip>:8080` / the PIN. Plain HTTP → gates access, not
+  traffic (camp-LAN trust model). BLE phone-companion + notification mirroring were
+  considered and **dropped** (Android would need a native app; Web-Bluetooth
+  excludes iOS Safari).
+
+## Config / manifest
+- `config.json`: new `contact` object (free-form `field: value`). `MANIFEST.JSON`:
+  version → `0.4.0`, description updated. `_load_config` reads `contact`;
+  `_apply_reload` (deferred to the main loop) reloads config + re-applies the beacon
+  after a portal save.
+
+---
+
 # !friends nearby — UI redesign + Fri3d 2026 support + button/perf fixes — 2026-07-11
 
 Renamed the app to **"!friends nearby"** and redesigned the screen; added Fri3d

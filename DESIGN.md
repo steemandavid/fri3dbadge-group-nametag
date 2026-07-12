@@ -241,12 +241,101 @@ config `"board"` key overrides autodetect. Screen size comes from
 | Backlight (dim) | none (no API → dim is a no-op) | **yes** via `mpos.io_expander.lcd_brightness` (0-100; dim re-enabled) |
 | X button | app reads GPIO38 (but OS also uses X = back) | OS = ESC/quit; **app does not bind X** (B is mute, START exits) |
 
-The app only binds **A** (panel), **B** (mute), **START** (exit) — read via the
+The app binds **A** (panel), **B** (mute), **Y** (contact swap) — read via the
 single `_held(name)` chokepoint which branches on `self._is_2026` (raw `Pin` poll
-on 2024, `io_expander.digital` on 2026, START=Pin(0) on both). **X is left to the
-OS** (quit) on both badges. Source for the 2026 pinout: the local
-`fri3d-badge-2026-developer-guide.md` + `fri3d-badge-hwtest/.../hwtest.py`
+on 2024, `io_expander.digital` on 2026; Y = GPIO41 / expander idx 8). **START** is
+unused; **X is left to the OS** (quit) on both badges. Source for the 2026 pinout:
+the local `fri3d-badge-2026-developer-guide.md` + `fri3d-badge-hwtest/.../hwtest.py`
 (authoritative `fri3d_2026.py` board module + live USB reads); the public
 badge_2026 docs describe the CH32X035 conceptually but give no pin table. The 2026
 path is **implemented but not yet runtime-verified** by the author (the 2026 badge
 was in active use / off-limits during development).
+
+## 8. Splash + live clock (v0.4.0)
+
+- **Splash** (`_build_splash` / `_splash_then_enter` in `group_nametag.py`):
+  built in `onCreate` and shown as the content view; a `TaskManager` task sleeps
+  3 s then swaps to the nametag (`_enter_main`). Shows app name, version (read
+  from `MANIFEST.JSON`), "by David Steeman", the Makerspace logo and name. The
+  logo uses the **in-memory decode path** `lv.image().set_src(lv.image_dsc_t({...
+  bytes ...}))` (asset `makerspace.png`, copied from `org.fri3d.hwtest`) — this is
+  reliable, unlike the `set_src("S:/…")` path (§1). Text fallback if the asset is
+  missing. **Verified on the 2024 badge** (splash then nametag, no wedge).
+- **Clock**: top-left label in the same font/colour as the battery % (`_refresh_
+  clock`, `HH:MM`, updated ~1/s). Time comes from the RTC, kept accurate by NTP:
+  MicroPythonOS syncs on WiFi connect, and `_resync_time` re-syncs ~every 10 min
+  (`ntptime.settime()` in a task, only when `WifiService.is_connected()`).
+  **Verified**: the running badge showed the correct wall-clock time (`10:13`).
+
+## 9. Contact exchange — Y button (`contact_exchange.py`)
+
+A short **connectable GATT session** (advertising's 31 bytes can't carry
+arbitrary contact JSON). Same pure/radio split as `ble_proximity.py`; the pure
+half is unit-tested off-device.
+
+- **Rendezvous = overlapping press-triggered windows** (not wall-clock slots, so
+  no synced clocks needed). Pressing **Y** opens a `WINDOW_MS = 5000` window in
+  which the badge advertises a **connectable** beacon (magic `HXCG`, a `want`
+  flag + nonce) *and* scans for peers' `HXCG` beacons. Two overlapping windows
+  find each other.
+- **Role tie-break** (`decide_role`): the two 6-byte addresses are compared;
+  **lower = GATT server** (keeps advertising, waits), **higher = client** (stops
+  advertising, `gap_connect`s). Both ends compute the same result, so exactly one
+  connection is made (no double-connect).
+- **The swap** is bidirectional in one connection: the server exposes a readable
+  `MYINFO` characteristic (its envelope) and a writable `THEIRS` characteristic;
+  the client reads `MYINFO` (gets the server's info) and writes its own envelope
+  to `THEIRS` (`_IRQ_GATTS_WRITE` on the server). MTU is raised
+  (`config(mtu=515)` + `gattc_exchange_mtu`) and the envelope capped to
+  `MAX_CONTACT_BYTES=500` (fields dropped last-first to fit) so it rides one
+  ATT op. Envelope = `{"n": name, "c": {field: value…}}` (`build/parse_contact_
+  envelope`, defensive).
+- **Coexistence:** NimBLE has a single legacy adv set + one IRQ handler, so the
+  exchange takes the radio over for the window: `BLEProximity.suspend()` stops the
+  proximity scan/adv (without `active(False)` — avoids the begin/end churn that
+  wedges the CDC, §1), and `resume()` reinstalls the proximity IRQ + non-
+  connectable beacon and re-arms the scan afterward.
+- **Storage:** received contacts are merged into
+  `/apps/…/contacts.json` by `merge_received` — **dedup by peer MAC** (refresh
+  fields + last-received, preserve `first_received`, bump `count`), capped at
+  `MAX_CONTACTS=200`. Each record carries `received_at` (`YYYY-MM-DDTHH:MM:SS`
+  from the NTP-synced RTC) + `received_ticks`.
+- **Verification status:** pure functions ✅ (off-device pytest). The radio
+  round-trip needs **two badges** pressing Y together (like the proximity round-
+  trip) — **not yet run** (single target badge on the bench). Risk noted: some
+  NimBLE builds require `gatts_register_services` before the *first* advertise; we
+  register lazily after `suspend()` and wrap everything in try/except so a failure
+  degrades to `No one swapping nearby` rather than crashing.
+
+## 10. WiFi setup portal (`web_portal.py`)
+
+Assumes the badge is **already on WiFi** (OS auto-connect) — the app does not
+manage STA/hotspot, it just reads `WifiService.get_ipv4_address()` and serves.
+Always-on while the app is foreground (`_start_portal` in `onResume`, `_stop_
+portal` in `onPause`/`onStop`). The built-in `WebServer` is only a WebREPL bridge,
+so this is a small custom HTTP server on `asyncio.start_server` (cooperative with
+the app's loop; no threads).
+
+- **Routes:** `GET /` (config form + dynamic `contact` key/value editor),
+  `POST /save` (writes `config.json`, fires an app reload), `GET /contacts`
+  (table), `GET /contacts.json` (export). Form helpers `parse_form` /
+  `form_to_config` are pure + unit-tested.
+- **Auth = badge-displayed PIN** (pairing model for an always-on server on a
+  shared camp LAN): a random 5-digit PIN per boot, entered once → signed session
+  cookie (`SESSION_TTL_MS`); ≥5 wrong tries → brief lockout + PIN rotation. The
+  nametag footer shows `⚙ http://<ip>:8080`, and surfaces the PIN as a challenge
+  (`portal PIN: …`) when an unauthenticated request arrives (`pending_pin()`).
+  Plain HTTP → the PIN gates *access*, not traffic; acceptable badge trust model.
+- **Config reload:** `on_change` sets a flag consumed on the main loop
+  (`_apply_reload`) which reloads config, updates the name/controls labels and
+  re-applies the on-air beacon — off the portal's async context, so it never
+  races the BLE tick or an exchange window.
+- **Verification status:** the portal **starts and the footer renders correctly**
+  on-device (showed `⚙ WiFi not connected` with no network present, and the
+  server binds regardless). Browser round-trip (login/save/export) needs the
+  badge on a real network — **not yet run** on the bench.
+
+Notifications-on-badge and a BLE phone-companion were considered and **dropped**
+(see the plan history): Android notification mirroring would force a native
+companion app, and BLE Web-Bluetooth config excludes iOS Safari — the always-on
+WiFi portal reaches every phone.

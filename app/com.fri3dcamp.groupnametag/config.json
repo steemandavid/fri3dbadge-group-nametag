@@ -2,5 +2,9 @@
   "groups": [],
   "name": "",
   "handle": "",
-  "rssi_floor": -120
+  "rssi_floor": -120,
+  "contact": {
+    "discord": "",
+    "website": ""
+  }
 }

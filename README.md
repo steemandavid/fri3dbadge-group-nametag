@@ -1,12 +1,23 @@
 # !friends nearby — Group Nametag + BLE Proximity Finder
 
-A MicroPythonOS app for the **Fri3d Camp 2024 badge** that does two things:
+A MicroPythonOS app for the **Fri3d Camp 2024 & 2026 badges** that does three
+things:
 
 1. **Animated nametag** — shows your name large (it scrolls if too long), with
-   your group(s) as coloured pills (the colour is unique to each group).
+   your group(s) as coloured pills (the colour is unique to each group), a live
+   NTP-synced clock (top-left) and battery % (top-right).
 2. **Proximity finder** — over Bluetooth Low Energy, it detects other badges
    running this app that share **at least one group** with you, and alerts you
    when one comes within radio range ("someone from my groups is nearby").
+3. **Contact swap (Y button)** — press **Y** near another badge whose owner also
+   presses **Y** within ~5 s (they need *not* be a friend or in your group), and
+   the two badges exchange contact info over a short Bluetooth connection. What
+   you send is a free-form set of fields you choose (Discord, website, phone,
+   bitcoin wallet…); what you receive is stored on the badge with the date/time.
+
+A **PIN-protected WiFi web portal** (served by the badge while it's on WiFi) lets
+you edit your name / groups / contact fields and view/export received contacts
+from a phone or laptop — the badge keyboard is too cumbersome for lots of text.
 
 It's **generic and redistributable**: any hackerspace/makerspace can flash it and
 set their own group name(s) and member name by editing one file (no code changes)
@@ -38,7 +49,11 @@ Edit **`/apps/com.fri3dcamp.groupnametag/config.json`**:
   "handle": "YOURCALL",
   "rssi_floor": -120,
   "sound": true,
-  "banner_ms": 5000
+  "banner_ms": 5000,
+  "contact": {
+    "discord": "alex#1234",
+    "website": "example.org"
+  }
 }
 ```
 
@@ -59,6 +74,34 @@ Edit **`/apps/com.fri3dcamp.groupnametag/config.json`**:
   Default `5000` (5 s).
 - **`board`** — optional, `"2024"` or `"2026"` to force the hardware profile
   (otherwise auto-detected). Only needed if autodetection fails.
+- **`contact`** — your "my contact info": a free-form object of `"field":
+  "value"` pairs (Discord, website, phone, bitcoin wallet, anything). This is the
+  data sent to another badge when you both press **Y**. Easiest to edit in the
+  **WiFi portal** (below) rather than by hand.
+
+## Setup / contacts over WiFi (no keyboard needed)
+
+While the badge is connected to WiFi, it serves a small **web portal** so you can
+edit everything above (name, groups, and the free-form `contact` fields) and
+view/export the contacts you've received — from a phone or laptop browser.
+
+- The badge shows its address at the bottom of the nametag: `⚙ http://<ip>:8080`
+  (or `⚙ WiFi not connected`).
+- Browsing there asks for a **PIN**. The badge shows the PIN on its screen as a
+  login challenge (`portal PIN: 12345`). Type it in once; a session cookie keeps
+  you in. Wrong guesses lock out briefly and rotate the PIN. The PIN gates
+  *access* only (it's plain HTTP on the local network) — enough for a badge.
+- Pages: **/** (edit config + add/remove contact fields), **/contacts** (received
+  contacts with date/time), **/contacts.json** (download/export).
+
+## Swapping contacts (Y button)
+
+Press **Y** and, within ~5 s, have a nearby badge's owner press **Y** too. The
+two badges find each other over Bluetooth and swap their `contact` info in both
+directions — **no shared group or friendship required**, just radio range. The
+banner confirms `Swapped with <name> ✓`; the received fields are stored on your
+badge with the date & time and are visible in the WiFi portal. (If nobody else is
+swapping in the window you get `No one swapping nearby`.)
 
 > Note: the screen shows your group(s) as **coloured pills** (colour derived from
 > the group name) — there's no logo image to swap. The bundled `logo.png` is not
@@ -75,8 +118,12 @@ Edit **`/apps/com.fri3dcamp.groupnametag/config.json`**:
 |---|---|
 | **A** | Open the friends-nearby panel (cards: name · shared group · signal bars · dBm · age) |
 | **B** | Mute / unmute the alert buzzer (saved to config, survives reboot) |
+| **Y** | Swap contacts with another badge nearby (they press **Y** too, within ~5 s) |
 | **X** | *(handled by the OS)* quit to the launcher / OS menu |
 | **START** | *(unused)* |
+
+At launch a **3-second splash** shows the app name, version, "by David Steeman"
+and the Makerspace Baasrode logo, then the nametag appears.
 
 The idle screen shows: your **name** large across the top (it scrolls if too
 long), your **group(s)** as coloured pills directly under it, battery %
@@ -109,8 +156,10 @@ at a camp.
 
 ```
 app/com.fri3dcamp.groupnametag/   → the app (deploy to /apps/…)
-  MANIFEST.JSON, group_nametag.py, ble_proximity.py, config.json, logo.png, icon_64x64.png
-tests/        off-device pytest for the BLE wire format (run: pytest tests/)
+  MANIFEST.JSON, group_nametag.py, ble_proximity.py (proximity beacon),
+  contact_exchange.py (Y-button GATT swap), web_portal.py (PIN-gated setup portal),
+  config.json, makerspace.png (splash logo), logo.png, icon_64x64.png
+tests/        off-device pytest: BLE wire format + contact exchange + portal forms
 tools/        host_advertise.py (act as a 2nd badge for testing), pull_file.py
 DESIGN.md     protocol spec, verified hardware facts, verification status, open items
 PLAN.md       the original full design document
