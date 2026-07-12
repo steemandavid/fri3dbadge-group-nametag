@@ -876,6 +876,14 @@ class GroupNametag(Activity):
                 self._handle_buttons()
                 if self._finishing:
                     break
+                # During a contact swap, keep the loop out of the radio's way:
+                # skip the periodic refreshers — especially _update_leds, whose
+                # WS2812 lights.write() disables IRQs and starves the short GATT
+                # connection (causing it to fail/drop). The exchange task owns the
+                # BLE for its ~5 s window; resume normal work when it's done.
+                if self._exchanging:
+                    await asyncio.sleep_ms(TICK_MS)
+                    continue
                 if self._reload_pending:
                     self._reload_pending = False
                     self._apply_reload()
