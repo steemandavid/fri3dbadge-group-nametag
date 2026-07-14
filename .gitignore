@@ -10,3 +10,6 @@ __pycache__/
 .DS_Store
 *~
 *.swp
+
+# build artifacts (.mpk packages) — reproducible from app/ via the bundling recipe
+dist/

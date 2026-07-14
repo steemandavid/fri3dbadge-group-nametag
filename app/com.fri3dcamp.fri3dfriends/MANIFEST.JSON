@@ -1,6 +1,6 @@
 {
   "name": "!Fri3d Friends",
-  "publisher": "Fri3d Camp",
+  "publisher": "David Steeman",
   "short_description": "Animated nametag + BLE proximity finder + contact swap",
   "long_description": "Shows your name and your group(s), and quietly alerts you when someone sharing one of your groups comes within Bluetooth range. Nearby friends appear as cards with signal strength. Press Y to swap contact info with another badge nearby (they press Y too). Configure your name, groups and free-form contact fields over an on-badge WiFi web portal (PIN-protected). Generic: any group sets its own name(s) and member by editing config.json.",
   "fullname": "com.fri3dcamp.fri3dfriends",
