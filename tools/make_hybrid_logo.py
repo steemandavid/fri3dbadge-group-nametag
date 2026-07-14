@@ -64,16 +64,18 @@ render(True).save(os.path.join(OUT, "11_hybrid.png"))            # preview (text
 APP = os.path.join(os.path.dirname(__file__), "..", "app", "com.fri3dcamp.fri3dfriends")
 
 
-def make_icon(scale=0.72, voff=-8):
-    """Launcher icon: the logo content shrunk + nudged up on the tile, so it
-    doesn't crowd the app-name label under it in the OS app menu."""
-    tile = Image.new("RGBA", (S, S), (0, 0, 0, 0))
-    ImageDraw.Draw(tile).rounded_rectangle([0, 0, S - 1, S - 1], radius=R, fill=NAVY + (255,))
-    logo = render(with_text=False, tile=False)          # 360x360, transparent
+def make_icon(scale=0.80, top_pad_px=3):
+    """Launcher icon: shrink the WHOLE tile (black square + badges) and leave
+    transparent padding around it — more at the bottom — so the icon graphic is
+    shorter and no longer overlaps the app-name label under it in the OS menu."""
+    full = render(with_text=False, tile=True)           # 360x360 full-bleed tile + badges
     sz = int(S * scale)
-    logo = logo.resize((sz, sz), Image.LANCZOS)
-    tile.alpha_composite(logo, ((S - sz) // 2, (S - sz) // 2 + voff))
-    return tile.resize((64, 64), Image.LANCZOS)
+    small = full.resize((sz, sz), Image.LANCZOS)
+    canvas = Image.new("RGBA", (S, S), (0, 0, 0, 0))    # transparent
+    x = (S - sz) // 2
+    y = int(top_pad_px / 64 * S)                        # small top pad -> bigger bottom pad
+    canvas.alpha_composite(small, (x, y))
+    return canvas.resize((64, 64), Image.LANCZOS)
 
 
 make_icon().save(os.path.join(APP, "icon_64x64.png"))
