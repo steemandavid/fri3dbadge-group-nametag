@@ -199,6 +199,12 @@ def add_received(store, entry, max_contacts=MAX_CONTACTS):
     return store
 
 
+# Backward-compat alias: an older group_nametag.py imports `merge_received`.
+# Keeping this makes contact_exchange.py self-consistent under a partial deploy
+# (device flash-copies are flaky here, so the two files can lag each other).
+merge_received = add_received
+
+
 # ---------------------------------------------------------------------------
 # 2. RADIO WRAPPER (lazy `import bluetooth`)
 # ---------------------------------------------------------------------------
