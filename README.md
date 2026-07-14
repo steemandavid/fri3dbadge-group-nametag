@@ -51,8 +51,10 @@ Edit **`/apps/com.fri3dcamp.groupnametag/config.json`**:
   "sound": true,
   "banner_ms": 5000,
   "contact": {
-    "discord": "alex#1234",
-    "website": "example.org"
+    "Email": "alex@example.org",
+    "Phone": "+32 0000 000",
+    "Website": "example.org",
+    "Discord": "alex#1234"
   }
 }
 ```
