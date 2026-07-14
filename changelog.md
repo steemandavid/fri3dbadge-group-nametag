@@ -1,3 +1,37 @@
+# !friends nearby — contact-swap bug fixes (re-entrancy + LED starvation) — 2026-07-13
+
+Fixed two bugs that made the Y-button contact swap fail in the field, found via
+on-device trace logging (`ContactExchange.dbg` → `/apps/.../exch.log`). Both
+confirmed fixed on hardware: repeated swaps now work, incl. cross-model 2024↔2026.
+
+## Bug 1 — re-entrancy (`OSError(22)` on the 2nd+ swap)
+The swap worked exactly once per power-on, then every later attempt threw
+`OSError(22)` (EINVAL) early in BLE setup until reboot. This *looked* like a
+2024-vs-2026 problem (the first test pair happened to be the first swap) but
+wasn't. Cause: NimBLE one-time-only stack ops (`config(mtu=…)`,
+`gatts_register_services`) were re-issued every window. Fix: `run_window` setup is
+now idempotent + fully guarded — MTU set once (`_mtu_set`), services once
+(`_svc_ready`), `active()` only if needed, and every setup call wrapped so none
+can abort the window.
+
+## Bug 2 — GATT connection starved by the LED loop
+After bug 1, the swap set up fine but the connection was unstable
+(`cli conn=None`, or connect-then-drop `read-exc NoneType`). Cause: the app's main
+loop ran concurrently with the exchange task and called `_update_leds()` →
+`lights.write()` (WS2812, IRQ-disabling) every 60 ms, starving the short GATT
+link. (This is why headless `run_window` tests passed — no main loop — but the
+live app failed.) Fix: while `self._exchanging`, the main loop only reads buttons
+and yields (no LED/BLE/refresh work), so the exchange owns the CPU + radio.
+
+## Ops notes
+- Heavy on-device BLE debugging repeatedly wedged the badges' USB-CDC (documented
+  failure mode — physical RESET is the only reliable recovery). Deploy right after
+  a reset (fresh CDC) before the app fully loads and contends the REPL.
+- The diagnostic trace (`dbg` + `exch.log`) is left in for now; trim once fully
+  proven in the field.
+
+---
+
 # !friends nearby — friend LEDs, clock inset, 2026 verified on hardware — 2026-07-12
 
 Follow-up to the splash/swap/portal work below. Added **per-friend breathing
