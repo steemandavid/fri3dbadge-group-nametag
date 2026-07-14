@@ -1,3 +1,35 @@
+# !Fri3d Friends — v0.6.0: BadgeHub packaging, repo rename, MIT license, icon polish — 2026-07-14
+
+Prepared the app for publishing on **BadgeHub.eu** and cleaned up release details.
+Bumped to **v0.6.0**; deployed to all three badges.
+
+## Publishing prep
+- Confirmed the BadgeHub flow (community appstore, `.mpk` packages, `mpos_api_0`
+  badge tag). Slug = the app `fullname` `com.fri3dcamp.fri3dfriends` (verified
+  against how every MicroPythonOS app on BadgeHub is slugged via its public API).
+- Build a deterministic `.mpk` (single top-level `fullname/` folder, stored,
+  fixed timestamps, dirs-before-files) → `dist/com.fri3dcamp.fri3dfriends_0.6.0.mpk`.
+  `dist/` is gitignored (artifact, reproducible from `app/`).
+- `MANIFEST.publisher` → **David Steeman** (was "Fri3d Camp").
+
+## Repo + license
+- **Renamed the GitHub repo** `fri3dbadge-group-nametag` → **`fri3d-friends`**
+  (github.com/steemandavid/fri3d-friends; old URL 301-redirects). Local `origin`
+  updated.
+- Added the **MIT LICENSE** (© 2026 David Steeman / Makerspace Baasrode).
+
+## Launcher icon
+- The icon's black tile was full-bleed and crowded the app-name label in the OS
+  menu. Shrunk the **whole tile** (~80%) with transparent padding, weighted to the
+  bottom, so the icon graphic clears the label. Redeployed to all badges.
+
+## Docs
+- README rounded out: AppStore-first install, friend-LED breathing, build/publish
+  (`.mpk` → BadgeHub) section, tests, MIT license, credits. Added a ready-to-post
+  Fri3d Discord announcement at `docs/announcement.md`.
+
+---
+
 # !Fri3d Friends — rebrand, bigger name font, per-swap contacts, UI/portal fixes — 2026-07-14
 
 Renamed the app **!friends nearby → !Fri3d Friends** and did a full rebrand, plus
