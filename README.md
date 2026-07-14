@@ -105,9 +105,9 @@ badge with the date & time and are visible in the WiFi portal. (If nobody else i
 swapping in the window you get `No one swapping nearby`.)
 
 > Note: the screen shows your group(s) as **coloured pills** (colour derived from
-> the group name) — there's no logo image to swap. The bundled `logo.png` is not
-> displayed. The app runs on **both the Fri3d 2024 and 2026 badges** (auto-detected;
-> force with the `board` key above).
+> the group name). The **!Fri3d Friends logo** (`fri3dfriends.png`) appears on the
+> startup splash. The app runs on **both the Fri3d 2024 and 2026 badges**
+> (auto-detected; force with the `board` key above).
 
 > **First-run / unconfigured:** if `name` is empty or `groups` is empty, the
 > badge shows a "Configure me" hint and **does not advertise or scan** — safer
@@ -159,9 +159,10 @@ at a camp.
 app/com.fri3dcamp.fri3dfriends/   → the app (deploy to /apps/…)
   MANIFEST.JSON, fri3d_friends.py, ble_proximity.py (proximity beacon),
   contact_exchange.py (Y-button GATT swap), web_portal.py (PIN-gated setup portal),
-  config.json, makerspace.png (splash logo), logo.png, icon_64x64.png
+  config.json, fri3dfriends.png (splash logo), icon_64x64.png (launcher icon),
+  montserrat_name.ttf (42px name font)
 tests/        off-device pytest: BLE wire format + contact exchange + portal forms
-tools/        host_advertise.py (act as a 2nd badge for testing), pull_file.py
+tools/        host_advertise.py, pull_file.py, make_logos.py + make_hybrid_logo.py (logo gen)
 DESIGN.md     protocol spec, verified hardware facts, verification status, open items
 PLAN.md       the original full design document
 ```

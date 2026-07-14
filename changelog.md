@@ -1,3 +1,51 @@
+# !Fri3d Friends — rebrand, bigger name font, per-swap contacts, UI/portal fixes — 2026-07-14
+
+Renamed the app **!friends nearby → !Fri3d Friends** and did a full rebrand, plus
+a batch of UX changes. Deployed + verified on all three badges (2× 2024, 1× 2026);
+57 off-device tests green. Bumped to **v0.5.0**.
+
+## Rebrand
+- Display name → **!Fri3d Friends** everywhere user-facing (MANIFEST, splash,
+  portal header, docs). Functional labels (`Friends nearby:`, detail header) kept.
+- **Package id renamed** (app unpublished, so safe): dir/fullname
+  `com.fri3dcamp.groupnametag → com.fri3dcamp.fri3dfriends`, module
+  `group_nametag.py → fri3d_friends.py`, class `GroupNametag → Fri3dFriends`.
+  On-badge deploy: single-session `mpremote fs cp -r` into the new dir, then a
+  script to **migrate each badge's config + contacts.json**, remove the old dir,
+  and reboot (far less USB-CDC churn than many small copies).
+- **New logo** — a hybrid of two proposals (badge-bump × pixel-people): two badges
+  bumping (the swap) each with a pixel friend + a spark. New `icon_64x64.png`
+  (tiled) + `fri3dfriends.png` (96px, tileless, splash). Old `makerspace.png`/
+  `logo.png` removed (the "Makerspace Baasrode" *text* attribution stays).
+  Generators: `tools/make_logos.py` (10 candidates) + `tools/make_hybrid_logo.py`.
+- **Splash relaid out** with explicit y-positions so "by David Steeman" no longer
+  overlaps the logo and the logo clears the "Makerspace Baasrode" line.
+
+## Name font + friends line
+- **Name at 42px** (1.5× the built-in `montserrat_28`) from a bundled ~15KB subset
+  Montserrat **TTF** via `FontManager.getFont(size, ttf=…)` → `tiny_ttf`. A fixed
+  font, not transform-scaled. (`lv.binfont_create` on an `lv_font_conv` `.bin` did
+  **not** load on this lvgl 9.4 build — the TTF path is what works.)
+- **Friends line** inset + `LONG_MODE.WRAP` so long peer names wrap instead of
+  being clipped by the curved corner.
+
+## Contacts / swap
+- **One entry per swap** (`merge_received` → `add_received`, append-only, no dedup;
+  cap 200, oldest-first). Kept a `merge_received = add_received` alias for
+  partial-deploy safety.
+- **Default contact fields** in the template: Email, Phone, Website, Discord.
+- **Removed the `handle` field entirely** (config, `_load_config`,
+  `ble_proximity.begin` signature + name-with-handle display, portal form,
+  `_outgoing_contact`, docs, tests). Swap sends **name + groups + contact fields**.
+
+## Portal fix
+- **Fixed badge reboot on config save**: the old reload rebuilt the whole LVGL
+  screen + cycled BLE (hard-crash + memory leak on this build). Now a safe
+  in-place reload; added save feedback — "Config saved ✓" banner on the badge and
+  a green note in the portal. Group changes apply on next app start.
+
+---
+
 # !friends nearby — contact-swap bug fixes (re-entrancy + LED starvation) — 2026-07-13
 
 Fixed two bugs that made the Y-button contact swap fail in the field, found via

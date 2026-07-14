@@ -85,9 +85,11 @@ app/com.fri3dcamp.fri3dfriends/   → deployed to /apps/com.fri3dcamp.fri3dfrien
   MANIFEST.JSON        MicroPythonOS app manifest (launcher intent)
   fri3d_friends.py     the Activity (UI, alerts, buttons, lifecycle)
   ble_proximity.py     BLE advertise/scan + group-aware state machine
-  config.json          per-group/member config (edit this)
-  logo.png             group logo (replace this); placeholder bundled as code fallback
-  icon_64x64.png       launcher icon
+  contact_exchange.py  Y-button connectable-GATT contact swap
+  web_portal.py        PIN-gated on-badge config/contacts web portal
+  config.json          per-group/member config (edit via the portal)
+  fri3dfriends.png     !Fri3d Friends splash logo   |  icon_64x64.png  launcher icon
+  montserrat_name.ttf  42px name font (subset TTF)
 tests/
   test_ble_proximity.py   off-device pytest (pure wire-format) — 30 tests, green
   conftest.py             sys.path shim (host imports ble_proximity straight from the app dir)
@@ -256,11 +258,13 @@ was in active use / off-limits during development).
 - **Splash** (`_build_splash` / `_splash_then_enter` in `fri3d_friends.py`):
   built in `onCreate` and shown as the content view; a `TaskManager` task sleeps
   3 s then swaps to the nametag (`_enter_main`). Shows app name, version (read
-  from `MANIFEST.JSON`), "by David Steeman", the Makerspace logo and name. The
-  logo uses the **in-memory decode path** `lv.image().set_src(lv.image_dsc_t({...
-  bytes ...}))` (asset `makerspace.png`, copied from `org.fri3d.hwtest`) — this is
-  reliable, unlike the `set_src("S:/…")` path (§1). Text fallback if the asset is
-  missing. **Verified on the 2024 badge** (splash then nametag, no wedge).
+  from `MANIFEST.JSON`), "by David Steeman", the **!Fri3d Friends logo**
+  (`fri3dfriends.png`, the badge-bump × pixel-people hybrid) and "Makerspace
+  Baasrode". The logo uses the **in-memory decode path**
+  `lv.image().set_src(lv.image_dsc_t({… bytes …}))` — reliable, unlike the
+  `set_src("S:/…")` path (§1). Explicit vertical positions (title y16 / ver y50 /
+  author y72 / logo y100–196 / org y206) keep clear gaps so nothing overlaps.
+  **Verified on all three badges** (splash then nametag, no wedge).
 - **Clock**: top-left label in the same font/colour as the battery %
   (`_refresh_clock`, `HH:MM`, updated ~1/s), inset to `CLOCK_X=24` so the curved
   screen corner doesn't clip it. Time comes from the RTC, kept accurate by NTP:
@@ -338,12 +342,14 @@ half is unit-tested off-device.
   who/what/when), capped at `MAX_CONTACTS=200` (oldest-appended dropped first).
   Each record carries mac, name, fields, rssi, `received_at`
   (`YYYY-MM-DDTHH:MM:SS` from the NTP-synced RTC) + `received_ticks`.
-- **Verification status:** pure functions ✅ (off-device pytest). The radio
-  round-trip needs **two badges** pressing Y together (like the proximity round-
-  trip) — **not yet run** (single target badge on the bench). Risk noted: some
-  NimBLE builds require `gatts_register_services` before the *first* advertise; we
-  register lazily after `suspend()` and wrap everything in try/except so a failure
-  degrades to `No one swapping nearby` rather than crashing.
+- **Verification status:** ✅ pure functions (off-device pytest) **and the real
+  two-badge round-trip** — swaps work repeatedly, incl. cross-model 2024↔2026.
+  Two field bugs were found + fixed (see changelog 2026-07-13): (1) re-entrancy —
+  `config(mtu=)`/`gatts_register_services` are one-time-only on NimBLE, so the
+  2nd+ swap threw `OSError(22)` until reboot (fixed by making setup idempotent +
+  guarded, `_mtu_set`/`_svc_ready`); (2) the main loop's `_update_leds()`
+  `lights.write()` (IRQ-disabling) starved the short GATT connection — the loop
+  now pauses all periodic work while `self._exchanging`.
 
 ## 10. WiFi setup portal (`web_portal.py`)
 
@@ -371,10 +377,12 @@ the app's loop; no threads).
   its scrolling labels) and cycling NimBLE hard-crash + reboot the badge on this
   build (and leak memory). So name/contact/runtime settings apply live; group
   pills and the on-air beacon update on the next app start.
-- **Verification status:** the portal **starts and the footer renders correctly**
-  on-device (showed `⚙ WiFi not connected` with no network present, and the
-  server binds regardless). Browser round-trip (login/save/export) needs the
-  badge on a real network — **not yet run** on the bench.
+- **Verification status:** ✅ confirmed end-to-end on-device — footer URL,
+  PIN login, editing config, and saving all work from a browser. A field bug was
+  fixed (changelog 2026-07-13): the old save-reload rebuilt the whole LVGL screen
+  + cycled BLE, which hard-crash/rebooted the badge and leaked memory; the reload
+  is now a safe in-place update (see the config-reload bullet above), and a
+  "Config saved ✓" banner (badge) + green note (portal) confirm the save.
 
 Notifications-on-badge and a BLE phone-companion were considered and **dropped**
 (see the plan history): Android notification mirroring would force a native
