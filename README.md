@@ -11,9 +11,10 @@ things:
    when one comes within radio range ("someone from my groups is nearby").
 3. **Contact swap (Y button)** — press **Y** near another badge whose owner also
    presses **Y** within ~5 s (they need *not* be a friend or in your group), and
-   the two badges exchange contact info over a short Bluetooth connection. What
-   you send is a free-form set of fields you choose (Discord, website, phone,
-   bitcoin wallet…); what you receive is stored on the badge with the date/time.
+   the two badges exchange contact info over a short Bluetooth connection. You
+   send your **name**, your **handle** and **group(s)**, plus a free-form set of
+   fields you choose (Email, Phone, Website, Discord, bitcoin wallet…). What you
+   receive is stored on the badge with the date/time — **one entry per swap**.
 
 A **PIN-protected WiFi web portal** (served by the badge while it's on WiFi) lets
 you edit your name / groups / contact fields and view/export received contacts

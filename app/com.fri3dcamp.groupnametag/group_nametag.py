@@ -80,11 +80,15 @@ except Exception:
 BANNER_MS_DEFAULT = 5000
 TICK_MS = 30
 
-# Name: font_montserrat_28 scaled up; long names marquee-scroll on one line.
-NAME_SCALE = 512                  # 2.0x (UNUSED now — scaling a scrolling label starves the CPU)
-NAME_TOP = 24
-NAME_H_SCALED = 33                # font_montserrat_28 line height (no transform scale)
-NAME_W = W - 60
+# Name: rendered in a bundled TrueType Montserrat at NAME_FONT_SIZE (1.5x the
+# largest built-in font_montserrat_28) via FontManager — a FIXED font, not a
+# transform-scaled one (scaling a scrolling label starves the CPU). Falls back to
+# font_montserrat_28 if the TTF can't be loaded. Long names marquee-scroll.
+NAME_FONT_SIZE = 42               # 1.5 × 28
+NAME_TTF = "M:apps/com.fri3dcamp.groupnametag/montserrat_name.ttf"
+NAME_TOP = 22
+NAME_H_SCALED = 52                # ~line height of the 42px name font
+NAME_W = W - 40
 
 BATT_X = W - 72
 BATT_Y = 8
@@ -210,6 +214,7 @@ class GroupNametag(Activity):
         self._led_last = None
         self._batt_next_ms = 0
         self._name_lbl = None
+        self._name_font = None
         self._batt_lbl = None
         self._clock_lbl = None
         self._clock_last = None
@@ -370,6 +375,19 @@ class GroupNametag(Activity):
             mpos.io_expander.lcd_brightness = max(0, min(100, int(v * 100 // 255)))
         except Exception:
             self._has_backlight = False
+
+    def _load_name_font(self):
+        # Load the bundled Montserrat TTF at NAME_FONT_SIZE via the OS FontManager
+        # (renders TrueType at any size — a fixed font, not a transform). Fall back
+        # to the largest built-in bitmap font if unavailable.
+        try:
+            from mpos import FontManager
+            f = FontManager.getFont(size=NAME_FONT_SIZE, ttf=NAME_TTF)
+            if f:
+                return f
+        except Exception:
+            pass
+        return lv.font_montserrat_28
 
     # ------------------------------------------------------------------ widgets
     def _label(self, scr, x, y, text, color, font=None, center=False, w=W):
@@ -622,11 +640,11 @@ class GroupNametag(Activity):
                                              COL_NONE, font=lv.font_montserrat_12, center=True)
             return
 
-        # Name: largest built-in font, single line, scrolls when too long.
-        # (No transform scale: scaling a scrolling label re-renders every frame
-        #  and starves the CPU -> missed buttons + stretched chime.)
+        # Name: bundled 42px TrueType font (1.5× the built-in max), single line,
+        # scrolls when too long. Fixed font, not transform-scaled (scaling a
+        # scrolling label re-renders every frame and starves the CPU).
         self._name_lbl = self._label(scr, (W - NAME_W) // 2, NAME_TOP, cfg["name"],
-                                     COL_NAME, font=lv.font_montserrat_28, center=True, w=NAME_W)
+                                     COL_NAME, font=self._name_font, center=True, w=NAME_W)
         try:
             self._name_lbl.set_long_mode(lv.label.LONG_MODE.SCROLL_CIRCULAR)
         except Exception:
@@ -641,9 +659,17 @@ class GroupNametag(Activity):
         # Group pills (full width, stacked) -> sets self._friends_top.
         self._place_pills(scr)
 
-        # Friends line directly under the pills.
-        self._friends_lbl = self._label(scr, 0, self._friends_top, "looking for friends…",
-                                        COL_NONE, font=lv.font_montserrat_14, center=True)
+        # Friends line directly under the pills. Inset from the curved edges and
+        # WRAP so long names ("David Steeman ON4BDS") wrap onto the next line
+        # instead of being clipped by the rounded screen corner.
+        fw = W - 40
+        self._friends_lbl = self._label(scr, (W - fw) // 2, self._friends_top,
+                                        "looking for friends…", COL_NONE,
+                                        font=lv.font_montserrat_14, center=True, w=fw)
+        try:
+            self._friends_lbl.set_long_mode(lv.label.LONG_MODE.WRAP)
+        except Exception:
+            pass
 
         # Portal footer (URL, or a login-challenge PIN) directly above controls.
         self._portal_lbl = self._label(scr, 0, CONTROLS_TOP - 14, "", COL_BATT,
@@ -786,6 +812,7 @@ class GroupNametag(Activity):
         self._setup_buttons()
         self._setup_buzzer()
         self._setup_display()
+        self._name_font = self._load_name_font()
         # Build the nametag now but show the splash first; swap after 3 s.
         self._scr = lv.obj()
         self._build_idle(self._scr)
@@ -959,8 +986,13 @@ class GroupNametag(Activity):
             return
         peers = self._ble.current_peers()
         n = len(peers)
-        new_txt = (("Friends nearby: " + ", ".join(p[0] for p in peers)[:48])
-                   if n else "looking for friends…")
+        if n:
+            names = ", ".join(p[0] for p in peers)
+            if len(names) > 90:          # wraps to ~3 lines; cap absurdly long lists
+                names = names[:89] + "…"
+            new_txt = "Friends nearby: " + names
+        else:
+            new_txt = "looking for friends…"
         if new_txt != self._friends_last:
             try:
                 self._friends_lbl.set_text(new_txt)
@@ -1067,6 +1099,19 @@ class GroupNametag(Activity):
         except Exception:
             pass
 
+    def _outgoing_contact(self):
+        # What the swap sends alongside the name. Auto-include the badge's own
+        # handle and group(s) as contact fields (a user-defined field of the same
+        # name in `contact` wins). Empty values are omitted.
+        out = dict(self._contact) if isinstance(self._contact, dict) else {}
+        handle = (self._config.get("handle") or "").strip()
+        if handle:
+            out.setdefault("Handle", handle)
+        groups = [g for g in (self._config.get("groups") or []) if g]
+        if groups:
+            out.setdefault("Groups", ", ".join(groups))
+        return out
+
     async def _do_exchange(self):
         self._exchanging = True
         t0 = time.ticks_ms()
@@ -1074,7 +1119,7 @@ class GroupNametag(Activity):
             self._show_banner("Swapping contacts…")
             self._wake()
             name = self._config.get("name", "") or "Anonymous"
-            rec = await self._exch.run_window(self._ble, name, self._contact)
+            rec = await self._exch.run_window(self._ble, name, self._outgoing_contact())
             self._exch_log("%s board=%s %dms rec=%r trace=%s" % (
                 _now_str(), "2026" if self._is_2026 else "2024",
                 time.ticks_diff(time.ticks_ms(), t0), rec,

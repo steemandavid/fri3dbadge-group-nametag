@@ -270,6 +270,20 @@ was in active use / off-limits during development).
   **blocking** `settime()` never hitches launch. **Verified**: running badges
   showed correct wall-clock time.
 
+## 11a. Name font & friends-line wrapping
+
+- **Name** is rendered at **42 px** (1.5× the largest built-in `montserrat_28`)
+  from a bundled subset TrueType (`montserrat_name.ttf`, ~15 KB, Latin+Latin-1)
+  via `FontManager.getFont(size=42, ttf="M:apps/…/montserrat_name.ttf")` →
+  `lv.tiny_ttf_create_file`. **Fixed font, not transform-scaled** (scaling a
+  scrolling label starves the CPU — §1). Falls back to `font_montserrat_28` if the
+  TTF can't be loaded. Note: `lv.binfont_create` on a `lv_font_conv` `.bin` did
+  **not** load on this lvgl 9.4 build (format mismatch) — the TTF path is the one
+  that works. `_load_name_font()` in `onCreate`.
+- **Friends line** is inset (`W-40`) and `LONG_MODE.WRAP` so long peer names
+  (e.g. `David Steeman ON4BDS`) wrap to the next line instead of being clipped by
+  the rounded screen corner; the name list is capped at ~90 chars.
+
 ## 11. Friend LEDs — per-friend breathing (v0.4.0)
 
 Each nearby friend gets one RGB LED, slowly + dimly **breathing that friend's
@@ -309,7 +323,10 @@ half is unit-tested off-device.
   (`config(mtu=515)` + `gattc_exchange_mtu`) and the envelope capped to
   `MAX_CONTACT_BYTES=500` (fields dropped last-first to fit) so it rides one
   ATT op. Envelope = `{"n": name, "c": {field: value…}}` (`build/parse_contact_
-  envelope`, defensive).
+  envelope`, defensive). `_outgoing_contact()` builds `c` from the user's
+  free-form `contact` fields plus the badge's own **`Handle`** and **`Groups`**
+  (auto-injected from config; a user field of the same name wins). The `handle`
+  and `groups` config keys are otherwise local (nametag/proximity only).
 - **Coexistence:** NimBLE has a single legacy adv set + one IRQ handler, so the
   exchange takes the radio over for the window: `BLEProximity.suspend()` stops the
   proximity scan/adv (without `active(False)` — avoids the begin/end churn that
@@ -348,9 +365,12 @@ the app's loop; no threads).
   (`portal PIN: …`) when an unauthenticated request arrives (`pending_pin()`).
   Plain HTTP → the PIN gates *access*, not traffic; acceptable badge trust model.
 - **Config reload:** `on_change` sets a flag consumed on the main loop
-  (`_apply_reload`) which reloads config, updates the name/controls labels and
-  re-applies the on-air beacon — off the portal's async context, so it never
-  races the BLE tick or an exchange window.
+  (`_apply_reload`), which does a **safe in-place reload only** — reload config +
+  `set_text` the name/controls + show a "Config saved ✓" banner. It deliberately
+  does **not** rebuild the screen or restart BLE: deleting the active screen (with
+  its scrolling labels) and cycling NimBLE hard-crash + reboot the badge on this
+  build (and leak memory). So name/contact/runtime settings apply live; group
+  pills and the on-air beacon update on the next app start.
 - **Verification status:** the portal **starts and the footer renders correctly**
   on-device (showed `⚙ WiFi not connected` with no network present, and the
   server binds regardless). Browser round-trip (login/save/export) needs the
