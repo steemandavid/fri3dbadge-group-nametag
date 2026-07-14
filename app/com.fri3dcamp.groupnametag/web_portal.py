@@ -407,7 +407,7 @@ class WebPortal:
         msg = "<p style='color:#f4534a'>Wrong PIN, try again.</p>" if error else ""
         if self._locked():
             msg = "<p style='color:#f4534a'>Too many attempts — locked briefly.</p>"
-        inner = ("<h1>!friends nearby — setup</h1>%s"
+        inner = ("<h1>!Fri3d Friends — setup</h1>%s"
                  "<p>Enter the PIN shown on the badge screen.</p>"
                  "<form method='POST' action='/login'>"
                  "<label>PIN</label><input name='pin' inputmode='numeric' autofocus>"

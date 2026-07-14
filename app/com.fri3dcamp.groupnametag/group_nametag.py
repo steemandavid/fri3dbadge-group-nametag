@@ -1,4 +1,4 @@
-# group_nametag.py — "!friends nearby" (Group Nametag + BLE Proximity Finder).
+# group_nametag.py — "!Fri3d Friends" (Group Nametag + BLE Proximity Finder).
 #
 # A MicroPythonOS Activity that runs on BOTH the Fri3d Camp 2024 badge and the
 # Fri3d Camp 2026 badge (both ESP32-S3 + MicroPythonOS). Shows your name (big,
@@ -568,7 +568,7 @@ class GroupNametag(Activity):
             pass
 
         title = lv.label(sp)
-        title.set_text("!friends nearby")
+        title.set_text("!Fri3d Friends")
         title.set_style_text_color(_col(COL_NEAR), 0)
         title.set_style_text_font(lv.font_montserrat_24, 0)
         title.align(lv.ALIGN.TOP_MID, 0, 24)

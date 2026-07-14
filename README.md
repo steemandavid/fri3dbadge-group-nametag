@@ -1,4 +1,4 @@
-# !friends nearby — Group Nametag + BLE Proximity Finder
+# !Fri3d Friends — Group Nametag + BLE Proximity Finder
 
 A MicroPythonOS app for the **Fri3d Camp 2024 & 2026 badges** that does three
 things:
@@ -35,7 +35,7 @@ mpremote connect /dev/ttyACM0 cp -r app/com.fri3dcamp.groupnametag :/apps/
 mpremote connect /dev/ttyACM0 reset
 ```
 
-After reboot, **!friends nearby** appears at the top of the launcher (the `!`
+After reboot, **!Fri3d Friends** appears at the top of the launcher (the `!`
 sorts it first). (If you added it without
 rebooting, run `AppManager.refresh_apps()` in the REPL or just reboot.)
 

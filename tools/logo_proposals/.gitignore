@@ -1,0 +1,3 @@
+# generated proposal images (reproducible via tools/make_logos.py)
+*.png
+index.html
