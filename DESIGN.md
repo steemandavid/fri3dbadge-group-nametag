@@ -315,11 +315,12 @@ half is unit-tested off-device.
   proximity scan/adv (without `active(False)` — avoids the begin/end churn that
   wedges the CDC, §1), and `resume()` reinstalls the proximity IRQ + non-
   connectable beacon and re-arms the scan afterward.
-- **Storage:** received contacts are merged into
-  `/apps/…/contacts.json` by `merge_received` — **dedup by peer MAC** (refresh
-  fields + last-received, preserve `first_received`, bump `count`), capped at
-  `MAX_CONTACTS=200`. Each record carries `received_at` (`YYYY-MM-DDTHH:MM:SS`
-  from the NTP-synced RTC) + `received_ticks`.
+- **Storage:** received contacts are appended to
+  `/apps/…/contacts.json` by `add_received` — **one entry per swap, no dedup**
+  (swapping again with the same badge creates another entry, a fresh snapshot of
+  who/what/when), capped at `MAX_CONTACTS=200` (oldest-appended dropped first).
+  Each record carries mac, name, fields, rssi, `received_at`
+  (`YYYY-MM-DDTHH:MM:SS` from the NTP-synced RTC) + `received_ticks`.
 - **Verification status:** pure functions ✅ (off-device pytest). The radio
   round-trip needs **two badges** pressing Y together (like the proximity round-
   trip) — **not yet run** (single target badge on the bench). Risk noted: some

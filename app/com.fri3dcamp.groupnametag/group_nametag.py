@@ -35,7 +35,7 @@ from ble_proximity import (
     BLEProximity, build_own_table, hash_groups, fnv1a_16,
     EVICT_MS, RSSI_FLOOR_DEFAULT,
 )
-from contact_exchange import ContactExchange, merge_received
+from contact_exchange import ContactExchange, add_received
 from web_portal import WebPortal
 
 FULLNAME = "com.fri3dcamp.groupnametag"
@@ -1112,7 +1112,7 @@ class GroupNametag(Activity):
 
     def _store_contact(self, rec):
         store = self._load_contacts()
-        merge_received(store, rec)
+        add_received(store, rec)
         try:
             with open(self._contacts_path(), "w") as f:
                 json.dump(store, f)

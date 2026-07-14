@@ -6,12 +6,12 @@ Covers the wire-format + storage half (no bluetooth/mpos/asyncio needed):
   - decide_role tie-break: deterministic, symmetric, exactly one initiator
   - contact envelope build/parse round-trip (unicode, size cap, dropped fields)
   - parse_contact_envelope defends against garbage
-  - merge_received dedup-by-mac, count bump, first_received preserved, cap/evict
+  - add_received appends one entry per swap (no dedup), cap/evict oldest
 """
 import contact_exchange as cx
 from contact_exchange import (
     build_exchange_adv, parse_exchange_adv, decide_role,
-    build_contact_envelope, parse_contact_envelope, merge_received,
+    build_contact_envelope, parse_contact_envelope, add_received,
     X_MAGIC, X_VERSION, MAX_CONTACT_BYTES,
 )
 
@@ -134,48 +134,56 @@ def test_parse_envelope_rejects_garbage():
 
 
 # ---------------------------------------------------------------------------
-# merge_received
+# add_received  (one entry per swap, no dedup)
 # ---------------------------------------------------------------------------
 def _entry(mac, name, fields, at, ticks=0, rssi=-50):
     return {"mac": mac, "name": name, "fields": fields,
             "received_at": at, "received_ticks": ticks, "rssi": rssi}
 
 
-def test_merge_appends_new():
+def test_add_appends_new():
     store = []
-    merge_received(store, _entry("aa", "Alice", {"x": "1"}, "2026-07-12T10:00:00"))
-    assert len(store) == 1
-    assert store[0]["name"] == "Alice"
-    assert store[0]["count"] == 1
-    assert store[0]["first_received"] == "2026-07-12T10:00:00"
-
-
-def test_merge_dedups_by_mac_keeps_first_received():
-    store = []
-    merge_received(store, _entry("aa", "Alice", {"x": "1"}, "2026-07-12T10:00:00"))
-    merge_received(store, _entry("aa", "Alice B", {"x": "2"}, "2026-07-12T11:00:00"))
+    add_received(store, _entry("aa", "Alice", {"x": "1"}, "2026-07-12T10:00:00"))
     assert len(store) == 1
     r = store[0]
-    assert r["name"] == "Alice B"
-    assert r["fields"] == {"x": "2"}
-    assert r["first_received"] == "2026-07-12T10:00:00"    # preserved
-    assert r["received_at"] == "2026-07-12T11:00:00"        # refreshed
-    assert r["count"] == 2
+    assert r["name"] == "Alice"
+    assert r["fields"] == {"x": "1"}
+    assert r["received_at"] == "2026-07-12T10:00:00"
+    assert r["mac"] == "aa"
 
 
-def test_merge_distinct_macs():
+def test_add_same_mac_creates_separate_entries():
+    # Swapping again with the SAME badge yields a second, independent entry.
     store = []
-    merge_received(store, _entry("aa", "A", {}, "t1"))
-    merge_received(store, _entry("bb", "B", {}, "t2"))
-    assert {r["mac"] for r in store} == {"aa", "bb"}
+    add_received(store, _entry("aa", "Alice", {"x": "1"}, "2026-07-12T10:00:00"))
+    add_received(store, _entry("aa", "Alice B", {"x": "2"}, "2026-07-12T11:00:00"))
+    assert len(store) == 2
+    assert [r["name"] for r in store] == ["Alice", "Alice B"]
+    assert [r["received_at"] for r in store] == ["2026-07-12T10:00:00", "2026-07-12T11:00:00"]
+    assert [r["fields"] for r in store] == [{"x": "1"}, {"x": "2"}]
 
 
-def test_merge_caps_and_evicts_oldest():
+def test_add_fields_snapshot_is_independent():
+    # Each entry keeps its own copy of the fields dict (no shared reference).
+    store = []
+    f = {"x": "1"}
+    add_received(store, _entry("aa", "A", f, "t1"))
+    f["x"] = "mutated"
+    assert store[0]["fields"] == {"x": "1"}
+
+
+def test_add_distinct_macs():
+    store = []
+    add_received(store, _entry("aa", "A", {}, "t1"))
+    add_received(store, _entry("bb", "B", {}, "t2"))
+    assert [r["mac"] for r in store] == ["aa", "bb"]
+
+
+def test_add_caps_and_evicts_oldest():
     store = []
     for i in range(5):
-        merge_received(store, _entry("m%02d" % i, "n%d" % i, {},
-                                     "2026-07-12T10:%02d:00" % i), max_contacts=3)
+        add_received(store, _entry("m%02d" % i, "n%d" % i, {},
+                                   "2026-07-12T10:%02d:00" % i), max_contacts=3)
     assert len(store) == 3
-    macs = {r["mac"] for r in store}
-    assert "m00" not in macs and "m01" not in macs   # two oldest evicted
-    assert "m04" in macs
+    names = [r["name"] for r in store]
+    assert names == ["n2", "n3", "n4"]      # two oldest-appended dropped, order kept

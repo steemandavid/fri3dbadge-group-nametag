@@ -6,7 +6,7 @@
 # Same two-part split as ble_proximity.py:
 #
 #   1. PURE FUNCTIONS (build/parse the exchange beacon, decide_role, the contact
-#      JSON envelope, merge_received). NO dependency on bluetooth/mpos/asyncio —
+#      JSON envelope, add_received). NO dependency on bluetooth/mpos/asyncio —
 #      unit-tested off-device (tests/test_contact_exchange.py). Importing this
 #      module on a host must work.
 #
@@ -175,46 +175,27 @@ def parse_contact_envelope(data):
     return {"name": name, "fields": fields}
 
 
-def merge_received(store, entry, max_contacts=MAX_CONTACTS):
-    """Insert/update a received contact in `store` (a list), deduped by MAC.
+def add_received(store, entry, max_contacts=MAX_CONTACTS):
+    """Append a received contact to `store` (a list) — ONE entry per swap.
 
-    `entry` must carry the already-computed fields: mac, name, fields,
-    received_at (formatted str), received_ticks (int), rssi. If a record with the
-    same mac exists, its name/fields/last-received are refreshed and `count` is
-    bumped while `first_received` is preserved; otherwise a new record is
-    appended. The list is capped to `max_contacts`, evicting the oldest by
-    first-received. Pure (no clock/BLE) so it is unit-tested off-device. Returns
-    the same list.
+    Every swap is recorded as its own separate entry, with its own name, fields,
+    timestamp and rssi. There is NO deduplication: swapping again with the same
+    badge creates another entry (a fresh snapshot of who/what/when). `entry` must
+    carry the already-computed fields: mac, name, fields, received_at (formatted
+    str), received_ticks (int), rssi. The list is capped to `max_contacts`,
+    dropping the oldest (front of the list) when exceeded. Pure (no clock/BLE) so
+    it is unit-tested off-device. Returns the same list.
     """
-    mac = entry.get("mac", "")
-    rec = None
-    for r in store:
-        if r.get("mac") == mac:
-            rec = r
-            break
-    if rec is None:
-        rec = {
-            "mac": mac,
-            "name": entry.get("name", ""),
-            "fields": dict(entry.get("fields", {})),
-            "first_received": entry.get("received_at", ""),
-            "received_at": entry.get("received_at", ""),
-            "received_ticks": entry.get("received_ticks", 0),
-            "rssi": entry.get("rssi", 0),
-            "count": 1,
-        }
-        store.append(rec)
-    else:
-        rec["name"] = entry.get("name", rec.get("name", ""))
-        rec["fields"] = dict(entry.get("fields", {}))
-        rec["received_at"] = entry.get("received_at", rec.get("received_at", ""))
-        rec["received_ticks"] = entry.get("received_ticks", rec.get("received_ticks", 0))
-        rec["rssi"] = entry.get("rssi", rec.get("rssi", 0))
-        rec["count"] = rec.get("count", 1) + 1
+    store.append({
+        "mac": entry.get("mac", ""),
+        "name": entry.get("name", ""),
+        "fields": dict(entry.get("fields", {})),
+        "received_at": entry.get("received_at", ""),
+        "received_ticks": entry.get("received_ticks", 0),
+        "rssi": entry.get("rssi", 0),
+    })
     if len(store) > max_contacts:
-        # Evict oldest first-received until within cap.
-        store.sort(key=lambda r: r.get("first_received", ""))
-        del store[:len(store) - max_contacts]
+        del store[:len(store) - max_contacts]      # drop oldest-appended entries
     return store
 
 
