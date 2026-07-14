@@ -289,10 +289,11 @@ class WebPortal:
             if clen > 0:
                 body = await reader.read(min(clen, MAX_BODY))
 
+            saved = "saved=1" in path
             path = path.split("?", 1)[0]
             cookie = headers.get("cookie", "")
             authed = self._valid_session(cookie)
-            await self._route(writer, method, path, body, authed)
+            await self._route(writer, method, path, body, authed, saved)
         except Exception:
             pass
         finally:
@@ -306,7 +307,7 @@ class WebPortal:
             except Exception:
                 pass
 
-    async def _route(self, writer, method, path, body, authed):
+    async def _route(self, writer, method, path, body, authed, saved=False):
         if path == "/login":
             if method == "POST":
                 form = parse_form(body)
@@ -327,10 +328,11 @@ class WebPortal:
             return await self._send(writer, 303, "text/html", "", extra="Location: /login\r\n")
 
         if path == "/" and method == "GET":
-            return await self._send(writer, 200, "text/html", self._config_page())
+            return await self._send(writer, 200, "text/html", self._config_page(saved))
         if path == "/save" and method == "POST":
-            self._save_config(parse_form(body))
-            return await self._send(writer, 303, "text/html", "", extra="Location: /?saved=1\r\n")
+            ok = self._save_config(parse_form(body))
+            loc = "/?saved=1" if ok else "/?saved=0"
+            return await self._send(writer, 303, "text/html", "", extra="Location: %s\r\n" % loc)
         if path == "/contacts" and method == "GET":
             return await self._send(writer, 200, "text/html", self._contacts_page())
         if path == "/contacts.json" and method == "GET":
@@ -368,12 +370,13 @@ class WebPortal:
             with open(self._app_dir + "/config.json", "w") as f:
                 json.dump(cfg, f)
         except Exception:
-            return
+            return False
         if self._on_change:
             try:
                 self._on_change()
             except Exception:
                 pass
+        return True
 
     def _load_contacts(self):
         try:
@@ -412,7 +415,7 @@ class WebPortal:
                  "<p class='muted'>Local PIN-gated portal (plain HTTP on the LAN).</p>" % msg)
         return self._page("Setup — login", inner)
 
-    def _config_page(self):
+    def _config_page(self, saved=None):
         cfg = self._load_config()
         contact = cfg.get("contact", {}) if isinstance(cfg.get("contact"), dict) else {}
         rows = ""
@@ -421,28 +424,34 @@ class WebPortal:
                      "<input name='cv' value='%s' placeholder='value'></div>"
                      % (_esc(k), _esc(v)))
         checked = "checked" if cfg.get("sound", True) else ""
-        inner = ("<h1>My nametag &amp; contact info</h1>"
-                 "<p><a href='/contacts'>&rarr; received contacts</a></p>"
-                 "<form method='POST' action='/save'>"
-                 "<label>Name</label><input name='name' value='%s'>"
-                 "<label>Handle (optional)</label><input name='handle' value='%s'>"
-                 "<label>Groups (comma-separated)</label><input name='groups' value='%s'>"
-                 "<label>RSSI floor (dBm, -120 = off)</label><input name='rssi_floor' value='%s'>"
-                 "<label>Banner ms</label><input name='banner_ms' value='%s'>"
-                 "<label><input type='checkbox' name='sound' %s style='width:auto'> alert sound</label>"
-                 "<h3>My contact info</h3><div class='muted'>Any fields you like — Discord, "
-                 "website, phone, bitcoin wallet…</div><div id='c'>%s</div>"
-                 "<button type='button' onclick='addRow()'>+ field</button>"
-                 "<div><button type='submit'>Save</button></div></form>"
-                 "<script>function addRow(){var d=document.createElement('div');d.className='row';"
-                 "d.innerHTML=\"<input name='ck' placeholder='field'>"
-                 "<input name='cv' placeholder='value'>\";"
-                 "document.getElementById('c').appendChild(d);}</script>"
-                 % (_esc(cfg.get("name", "")), _esc(cfg.get("handle", "")),
-                    _esc(", ".join(cfg.get("groups", []) or [])),
-                    _esc(cfg.get("rssi_floor", -120)), _esc(cfg.get("banner_ms", 5000)),
-                    checked, rows))
-        return self._page("My nametag & contact info", inner)
+        note = ""
+        if saved:
+            note = ("<div style='background:#143a2a;border:1px solid #2dd36b;color:#9fe0a0;"
+                    "padding:10px;border-radius:8px;margin:8px 0'>Saved ✓ &mdash; name &amp; "
+                    "contact info apply immediately; restart the app on the badge to apply "
+                    "<b>group</b> changes.</div>")
+        header = ("<h1>My nametag &amp; contact info</h1>" + note +
+                  "<p><a href='/contacts'>&rarr; received contacts</a></p>")
+        form = ("<form method='POST' action='/save'>"
+                "<label>Name</label><input name='name' value='%s'>"
+                "<label>Handle (optional)</label><input name='handle' value='%s'>"
+                "<label>Groups (comma-separated)</label><input name='groups' value='%s'>"
+                "<label>RSSI floor (dBm, -120 = off)</label><input name='rssi_floor' value='%s'>"
+                "<label>Banner ms</label><input name='banner_ms' value='%s'>"
+                "<label><input type='checkbox' name='sound' %s style='width:auto'> alert sound</label>"
+                "<h3>My contact info</h3><div class='muted'>Any fields you like — Discord, "
+                "website, phone, bitcoin wallet…</div><div id='c'>%s</div>"
+                "<button type='button' onclick='addRow()'>+ field</button>"
+                "<div><button type='submit'>Save</button></div></form>"
+                "<script>function addRow(){var d=document.createElement('div');d.className='row';"
+                "d.innerHTML=\"<input name='ck' placeholder='field'>"
+                "<input name='cv' placeholder='value'>\";"
+                "document.getElementById('c').appendChild(d);}</script>"
+                % (_esc(cfg.get("name", "")), _esc(cfg.get("handle", "")),
+                   _esc(", ".join(cfg.get("groups", []) or [])),
+                   _esc(cfg.get("rssi_floor", -120)), _esc(cfg.get("banner_ms", 5000)),
+                   checked, rows))
+        return self._page("My nametag & contact info", header + form)
 
     def _contacts_page(self):
         contacts = self._load_contacts()

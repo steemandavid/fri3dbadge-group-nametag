@@ -1180,48 +1180,28 @@ class GroupNametag(Activity):
         self._reload_pending = True
 
     def _apply_reload(self):
-        # Don't rebuild the screen underneath a live exchange window; retry after.
+        # Runs on the main loop after a portal save. Keep this SAFE: only reload
+        # the in-memory config and do in-place label updates. Do NOT rebuild the
+        # screen or restart BLE here — deleting the active screen (with its
+        # scrolling labels) and cycling NimBLE hard-crash + reboot the badge on
+        # this build, and the repeated allocation leaks memory. Name + contact +
+        # runtime settings apply live; group pills and the on-air beacon
+        # (name/groups) update on the next app start.
         if self._exchanging:
             self._reload_pending = True
             return
-        self._load_config()
-        # Rebuild the whole idle screen so the group PILLS (and the
-        # configured/unconfigured layout) reflect the new config — not just the
-        # name. Pills are built once in _build_idle, so a live edit needs a rebuild.
-        self._rebuild_screen()
-        # Re-apply the on-air beacon (name/groups) after an edit.
         try:
-            self._ble.end()
+            self._load_config()
         except Exception:
             pass
-        if not self._unconfigured:
+        if self._name_lbl is not None:
             try:
-                self._ble.begin(self._config["groups"], self._config["name"],
-                                self._config["handle"], self._config["rssi_floor"])
+                self._name_lbl.set_text(self._config.get("name", ""))
             except Exception:
                 pass
-
-    def _rebuild_screen(self):
-        old = self._scr
-        try:
-            self._scr = lv.obj()
-            self._build_idle(self._scr)
-            if self._entered:
-                self.setContentView(self._scr)
-        except Exception:
-            self._scr = old        # keep the working screen if the rebuild failed
-            return
-        if old is not None and old is not self._splash_scr:
+        if self._controls_lbl is not None:
             try:
-                old.delete()
+                self._controls_lbl.set_text(self._controls_text())
             except Exception:
                 pass
-        # Reset per-label caches so the refreshers repopulate the fresh widgets.
-        self._friends_last = None
-        self._batt_last = None
-        self._clock_last = None
-        self._portal_last = None
-        self._detail_header_last = None
-        self._detail = False
-        self._banner_until = 0
-        self._alert_names = []
+        self._show_banner("Config saved ✓")
