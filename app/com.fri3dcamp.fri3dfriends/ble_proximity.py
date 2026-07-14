@@ -286,22 +286,18 @@ class BLEProximity:
         self._suspended = False       # True while the contact-exchange window owns the radio
 
     # ---- lifecycle ----
-    def begin(self, groups, name, handle="", rssi_floor=RSSI_FLOOR_DEFAULT):
+    def begin(self, groups, name, rssi_floor=RSSI_FLOOR_DEFAULT):
         import bluetooth
         from bluetooth import BLE
         self._own_ids, _ = hash_groups(groups)
         self._own_table = build_own_table(groups)
-        # Coerce identity fields to str so a non-string config value degrades
-        # instead of crashing begin() in build_payload/truncate_utf8.
+        # Coerce the name to str so a non-string config value degrades instead of
+        # crashing begin() in build_payload/truncate_utf8.
         self._name = name if isinstance(name, str) else ""
-        handle = handle if isinstance(handle, str) else ""
         self._rssi_floor = self._validate_floor(rssi_floor)
         self._irq_scan_result = getattr(bluetooth, "_IRQ_SCAN_RESULT", 5)
 
-        disp = self._name
-        if handle:
-            disp = self._name + " " + handle
-        self._adv = build_payload(self._own_ids, disp)
+        self._adv = build_payload(self._own_ids, self._name)
 
         self._ble = BLE()
         self._ble.active(True)

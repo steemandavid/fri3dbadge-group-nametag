@@ -1,4 +1,4 @@
-# group_nametag.py — "!Fri3d Friends" (Group Nametag + BLE Proximity Finder).
+# fri3d_friends.py — "!Fri3d Friends" (Group Nametag + BLE Proximity Finder).
 #
 # A MicroPythonOS Activity that runs on BOTH the Fri3d Camp 2024 badge and the
 # Fri3d Camp 2026 badge (both ESP32-S3 + MicroPythonOS). Shows your name (big,
@@ -23,7 +23,7 @@ import time
 import json
 import asyncio
 
-APP_DIR = "/apps/com.fri3dcamp.groupnametag"
+APP_DIR = "/apps/com.fri3dcamp.fri3dfriends"
 if APP_DIR not in sys.path:
     sys.path.insert(0, APP_DIR)
 
@@ -38,7 +38,7 @@ from ble_proximity import (
 from contact_exchange import ContactExchange, add_received
 from web_portal import WebPortal
 
-FULLNAME = "com.fri3dcamp.groupnametag"
+FULLNAME = "com.fri3dcamp.fri3dfriends"
 
 
 def _read_version():
@@ -85,7 +85,7 @@ TICK_MS = 30
 # transform-scaled one (scaling a scrolling label starves the CPU). Falls back to
 # font_montserrat_28 if the TTF can't be loaded. Long names marquee-scroll.
 NAME_FONT_SIZE = 42               # 1.5 × 28
-NAME_TTF = "M:apps/com.fri3dcamp.groupnametag/montserrat_name.ttf"
+NAME_TTF = "M:apps/com.fri3dcamp.fri3dfriends/montserrat_name.ttf"
 NAME_TOP = 22
 NAME_H_SCALED = 52                # ~line height of the 42px name font
 NAME_W = W - 40
@@ -184,7 +184,7 @@ def _rssi_bars(rssi):
     return 0 if lvl < 0 else (4 if lvl > 4 else lvl)
 
 
-class GroupNametag(Activity):
+class Fri3dFriends(Activity):
     def __init__(self):
         super().__init__()
         self._ble = BLEProximity()
@@ -244,7 +244,7 @@ class GroupNametag(Activity):
 
     # ------------------------------------------------------------------ config
     def _load_config(self):
-        cfg = {"groups": [], "name": "", "handle": "", "rssi_floor": RSSI_FLOOR_DEFAULT,
+        cfg = {"groups": [], "name": "", "rssi_floor": RSSI_FLOOR_DEFAULT,
                "sound": True, "banner_ms": BANNER_MS_DEFAULT}
         try:
             with open(APP_DIR + "/config.json", "r") as f:
@@ -254,7 +254,6 @@ class GroupNametag(Activity):
         if not isinstance(cfg.get("groups"), list):
             cfg["groups"] = []
         cfg["name"] = (cfg.get("name") or "").strip()
-        cfg["handle"] = (cfg.get("handle") or "").strip()
         try:
             rf = int(cfg.get("rssi_floor", RSSI_FLOOR_DEFAULT))
         except (TypeError, ValueError):
@@ -567,40 +566,41 @@ class GroupNametag(Activity):
         except Exception:
             pass
 
+        # Explicit vertical layout (H=240) so nothing overlaps: title / version /
+        # author up top, the 96px logo in the middle with clear gaps above and
+        # below, and the Makerspace attribution pinned near the bottom.
         title = lv.label(sp)
         title.set_text("!Fri3d Friends")
         title.set_style_text_color(_col(COL_NEAR), 0)
         title.set_style_text_font(lv.font_montserrat_24, 0)
-        title.align(lv.ALIGN.TOP_MID, 0, 24)
+        title.align(lv.ALIGN.TOP_MID, 0, 16)
 
         ver = lv.label(sp)
         ver.set_text("v" + _read_version())
         ver.set_style_text_color(_col(COL_NONE), 0)
         ver.set_style_text_font(lv.font_montserrat_14, 0)
-        ver.align(lv.ALIGN.TOP_MID, 0, 56)
+        ver.align(lv.ALIGN.TOP_MID, 0, 50)
 
         who = lv.label(sp)
         who.set_text("by David Steeman")
         who.set_style_text_color(_col(COL_NAME), 0)
         who.set_style_text_font(lv.font_montserrat_16, 0)
-        who.align(lv.ALIGN.TOP_MID, 0, 80)
+        who.align(lv.ALIGN.TOP_MID, 0, 72)
 
-        logo = _asset_bytes("makerspace.png")
-        placed = False
+        logo = _asset_bytes("fri3dfriends.png")     # 96x96 app logo
         if logo:
             try:
                 li = lv.image(sp)
                 li.set_src(lv.image_dsc_t({"data_size": len(logo), "data": logo}))
-                li.align(lv.ALIGN.CENTER, 0, 24)
-                placed = True
+                li.align(lv.ALIGN.TOP_MID, 0, 100)   # top at y=100 -> bottom ~196
             except Exception:
-                placed = False
+                pass
 
         org = lv.label(sp)
         org.set_text("Makerspace Baasrode")
         org.set_style_text_color(_col(COL_BAR_ON), 0)
         org.set_style_text_font(lv.font_montserrat_16, 0)
-        org.align(lv.ALIGN.BOTTOM_MID, 0, -20 if placed else -60)
+        org.align(lv.ALIGN.BOTTOM_MID, 0, -14)       # top ~y=210
         return sp
 
     async def _splash_then_enter(self):
@@ -831,7 +831,7 @@ class GroupNametag(Activity):
         if not self._unconfigured:
             try:
                 self._ble.begin(self._config["groups"], self._config["name"],
-                                self._config["handle"], self._config["rssi_floor"])
+                                self._config["rssi_floor"])
             except Exception:
                 pass
         self._start_portal()
@@ -1101,12 +1101,9 @@ class GroupNametag(Activity):
 
     def _outgoing_contact(self):
         # What the swap sends alongside the name. Auto-include the badge's own
-        # handle and group(s) as contact fields (a user-defined field of the same
-        # name in `contact` wins). Empty values are omitted.
+        # group(s) as a contact field (a user-defined field of the same name in
+        # `contact` wins). Empty values are omitted.
         out = dict(self._contact) if isinstance(self._contact, dict) else {}
-        handle = (self._config.get("handle") or "").strip()
-        if handle:
-            out.setdefault("Handle", handle)
         groups = [g for g in (self._config.get("groups") or []) if g]
         if groups:
             out.setdefault("Groups", ", ".join(groups))

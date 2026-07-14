@@ -31,12 +31,13 @@ def test_parse_form_empty_and_valueless():
 
 
 def test_form_to_config_full():
-    form = parse_form("name=David&handle=DS&groups=Alpha%2C+Beta+%2C%2C&"
+    form = parse_form("name=David&groups=Alpha%2C+Beta+%2C%2C&"
                       "rssi_floor=-80&banner_ms=3000&sound=on&"
                       "ck=discord&cv=dave%231&ck=btc&cv=bc1qxyz")
     cfg = form_to_config(form, {"keep": "me"})
     assert cfg["keep"] == "me"                     # base preserved
     assert cfg["name"] == "David"
+    assert "handle" not in cfg                     # handle field removed
     assert cfg["groups"] == ["Alpha", "Beta"]      # trimmed, empties dropped
     assert cfg["rssi_floor"] == -80
     assert cfg["banner_ms"] == 3000

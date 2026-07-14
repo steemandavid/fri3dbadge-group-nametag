@@ -118,7 +118,6 @@ def form_to_config(form, base):
         v = form.get(key, [default])
         return v[0] if v else default
     cfg["name"] = one("name").strip()
-    cfg["handle"] = one("handle").strip()
     groups = one("groups")
     cfg["groups"] = [g.strip() for g in groups.split(",") if g.strip()]
     try:
@@ -434,7 +433,6 @@ class WebPortal:
                   "<p><a href='/contacts'>&rarr; received contacts</a></p>")
         form = ("<form method='POST' action='/save'>"
                 "<label>Name</label><input name='name' value='%s'>"
-                "<label>Handle (optional)</label><input name='handle' value='%s'>"
                 "<label>Groups (comma-separated)</label><input name='groups' value='%s'>"
                 "<label>RSSI floor (dBm, -120 = off)</label><input name='rssi_floor' value='%s'>"
                 "<label>Banner ms</label><input name='banner_ms' value='%s'>"
@@ -447,7 +445,7 @@ class WebPortal:
                 "d.innerHTML=\"<input name='ck' placeholder='field'>"
                 "<input name='cv' placeholder='value'>\";"
                 "document.getElementById('c').appendChild(d);}</script>"
-                % (_esc(cfg.get("name", "")), _esc(cfg.get("handle", "")),
+                % (_esc(cfg.get("name", "")),
                    _esc(", ".join(cfg.get("groups", []) or [])),
                    _esc(cfg.get("rssi_floor", -120)), _esc(cfg.get("banner_ms", 5000)),
                    checked, rows))

@@ -25,9 +25,9 @@ Consequences (all verified by probe — see `probes/`):
   `onResume(screen)` / `onPause` / `onStop` / `onDestroy` / `onBackPressed`;
   return to launcher via `self.finish()`. The OS launcher discovers the app
   automatically (AppManager; call `AppManager.refresh_apps()` if added without a
-  reboot). This app: `com.fri3dcamp.groupnametag`.
-- **Config** is read from `/apps/com.fri3dcamp.groupnametag/config.json` (the
-  per-install `groups`/`name`/`handle`/`rssi_floor`). Edit + reset (or refresh)
+  reboot). This app: `com.fri3dcamp.fri3dfriends`.
+- **Config** is read from `/apps/com.fri3dcamp.fri3dfriends/config.json` (the
+  per-install `groups`/`name`/`rssi_floor`). Edit + reset (or refresh)
   — same UX intent as the plan's "edit app.json + reset".
 
 ### Verified hardware / API facts (2026-07-07)
@@ -35,7 +35,7 @@ Consequences (all verified by probe — see `probes/`):
 | Concern | Finding |
 |---|---|
 | Display | GC9307 296×240, driven by lvgl v9 (`lv.obj()`/`lv.image()`/...). `lv.display_get_default()` (not `disp_get_default`). Decoders compiled in. |
-| Logo decode | **`mpos.fs_driver` registers an LV_FS `"S:"` drive** → `im.set_src("S:/apps/com.fri3dcamp.groupnametag/logo.png")` decodes PNG/JPEG by path. No in-memory-buffer gymnastics needed (PLAN §7 primary-path spike is moot). Fallback: a runtime-drawn placeholder if the file is missing/broken. |
+| Logo decode | **`mpos.fs_driver` registers an LV_FS `"S:"` drive** → `im.set_src("S:/apps/com.fri3dcamp.fri3dfriends/logo.png")` decodes PNG/JPEG by path. No in-memory-buffer gymnastics needed (PLAN §7 primary-path spike is moot). Fallback: a runtime-drawn placeholder if the file is missing/broken. |
 | LEDs | 5× WS2812 on GPIO12 via `mpos.lights` (`set_all(r,g,b)`, `set_led(i,r,g,b)`, `clear()`, `write()`, `get_led_count()==5`). `set_all` takes 3 args, **not** a tuple. |
 | Buzzer | GPIO46 via `machine.PWM(Pin(46))` (`freq`, `duty_u16`, `0`=silent). |
 | Buttons | raw `machine.Pin(gp, IN, PULL_UP)`, `value()==0` = pressed: START=0, X=38, A=39, B=40, Y=41, MENU=45. (`mpos.InputManager` is for lvgl pointer indevs, not these buttons.) |
@@ -81,9 +81,9 @@ Consequences (all verified by probe — see `probes/`):
 ## 2. Project layout
 
 ```
-app/com.fri3dcamp.groupnametag/   → deployed to /apps/com.fri3dcamp.groupnametag/
+app/com.fri3dcamp.fri3dfriends/   → deployed to /apps/com.fri3dcamp.fri3dfriends/
   MANIFEST.JSON        MicroPythonOS app manifest (launcher intent)
-  group_nametag.py     the Activity (UI, alerts, buttons, lifecycle)
+  fri3d_friends.py     the Activity (UI, alerts, buttons, lifecycle)
   ble_proximity.py     BLE advertise/scan + group-aware state machine
   config.json          per-group/member config (edit this)
   logo.png             group logo (replace this); placeholder bundled as code fallback
@@ -226,7 +226,7 @@ does not depend on the exact number, only on "roughly same area."**
 ## 7. 2024 vs 2026 badge support
 
 The app runs on both the Fri3d Camp 2024 and 2026 badges (both ESP32-S3 +
-MicroPythonOS). Hardware differences are abstracted in `group_nametag.py` and
+MicroPythonOS). Hardware differences are abstracted in `fri3d_friends.py` and
 selected at runtime. **Board detect:** `mpos.DeviceInfo.get_hardware_id()` →
 `"fri3d_2026"` (fallback: `mpos.io_expander.version` exists only on 2026); a
 config `"board"` key overrides autodetect. Screen size comes from
@@ -253,7 +253,7 @@ was in active use / off-limits during development).
 
 ## 8. Splash + live clock (v0.4.0)
 
-- **Splash** (`_build_splash` / `_splash_then_enter` in `group_nametag.py`):
+- **Splash** (`_build_splash` / `_splash_then_enter` in `fri3d_friends.py`):
   built in `onCreate` and shown as the content view; a `TaskManager` task sleeps
   3 s then swaps to the nametag (`_enter_main`). Shows app name, version (read
   from `MANIFEST.JSON`), "by David Steeman", the Makerspace logo and name. The
@@ -324,9 +324,9 @@ half is unit-tested off-device.
   `MAX_CONTACT_BYTES=500` (fields dropped last-first to fit) so it rides one
   ATT op. Envelope = `{"n": name, "c": {field: value…}}` (`build/parse_contact_
   envelope`, defensive). `_outgoing_contact()` builds `c` from the user's
-  free-form `contact` fields plus the badge's own **`Handle`** and **`Groups`**
-  (auto-injected from config; a user field of the same name wins). The `handle`
-  and `groups` config keys are otherwise local (nametag/proximity only).
+  free-form `contact` fields plus the badge's own **`Groups`** (auto-injected from
+  config; a user field of the same name wins). The `groups` config key is
+  otherwise local (nametag/proximity only).
 - **Coexistence:** NimBLE has a single legacy adv set + one IRQ handler, so the
   exchange takes the radio over for the window: `BLEProximity.suspend()` stops the
   proximity scan/adv (without `active(False)` — avoids the begin/end churn that

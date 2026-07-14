@@ -12,9 +12,9 @@ things:
 3. **Contact swap (Y button)** — press **Y** near another badge whose owner also
    presses **Y** within ~5 s (they need *not* be a friend or in your group), and
    the two badges exchange contact info over a short Bluetooth connection. You
-   send your **name**, your **handle** and **group(s)**, plus a free-form set of
-   fields you choose (Email, Phone, Website, Discord, bitcoin wallet…). What you
-   receive is stored on the badge with the date/time — **one entry per swap**.
+   send your **name** and **group(s)**, plus a free-form set of fields you choose
+   (Email, Phone, Website, Discord, bitcoin wallet…). What you receive is stored
+   on the badge with the date/time — **one entry per swap**.
 
 A **PIN-protected WiFi web portal** (served by the badge while it's on WiFi) lets
 you edit your name / groups / contact fields and view/export received contacts
@@ -26,12 +26,12 @@ set their own group name(s) and member name by editing one file (no code changes
 
 ## Install (on the badge)
 
-The app folder is `app/com.fri3dcamp.groupnametag/`. Copy it to `/apps/` on the
+The app folder is `app/com.fri3dcamp.fri3dfriends/`. Copy it to `/apps/` on the
 badge, then refresh the launcher (or reboot):
 
 ```bash
 # with mpremote (https://docs.micropython.org/en/latest/reference/mpremote.html)
-mpremote connect /dev/ttyACM0 cp -r app/com.fri3dcamp.groupnametag :/apps/
+mpremote connect /dev/ttyACM0 cp -r app/com.fri3dcamp.fri3dfriends :/apps/
 mpremote connect /dev/ttyACM0 reset
 ```
 
@@ -41,13 +41,12 @@ rebooting, run `AppManager.refresh_apps()` in the REPL or just reboot.)
 
 ## Configure (no code edits)
 
-Edit **`/apps/com.fri3dcamp.groupnametag/config.json`**:
+Edit **`/apps/com.fri3dcamp.fri3dfriends/config.json`**:
 
 ```json
 {
   "groups": ["Makerspace Baasrode"],
   "name": "Alex",
-  "handle": "YOURCALL",
   "rssi_floor": -120,
   "sound": true,
   "banner_ms": 5000,
@@ -65,7 +64,6 @@ Edit **`/apps/com.fri3dcamp.groupnametag/config.json`**:
   hashed before broadcast (never sent as text), so type it the same way on every
   member's badge (case/whitespace are ignored). Up to ~5 groups.
 - **`name`** — your display name (shown large across the top of the screen).
-- **`handle`** — optional second line (callsign / nickname); may be `""`.
 - **`rssi_floor`** — optional coarse range gate in dBm. Default **`-120`** =
   detect anything the radio can hear (full range). Raise it to only alert on
   badges that are close, e.g. `-80` (≈ same tent / ~10 m) or `-70` (≈ next to me).
@@ -158,8 +156,8 @@ at a camp.
 ## Project layout
 
 ```
-app/com.fri3dcamp.groupnametag/   → the app (deploy to /apps/…)
-  MANIFEST.JSON, group_nametag.py, ble_proximity.py (proximity beacon),
+app/com.fri3dcamp.fri3dfriends/   → the app (deploy to /apps/…)
+  MANIFEST.JSON, fri3d_friends.py, ble_proximity.py (proximity beacon),
   contact_exchange.py (Y-button GATT swap), web_portal.py (PIN-gated setup portal),
   config.json, makerspace.png (splash logo), logo.png, icon_64x64.png
 tests/        off-device pytest: BLE wire format + contact exchange + portal forms
