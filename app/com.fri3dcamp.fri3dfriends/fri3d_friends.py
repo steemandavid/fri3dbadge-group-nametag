@@ -63,6 +63,16 @@ def _asset_bytes(name):
     return None
 
 
+def _atomic_write_json(path, obj):
+    """Write JSON to `path` via a temp file + rename (atomic on LittleFS/FAT).
+    A power-off mid-write then can't corrupt the file into an unloadable state
+    (which every loader silently turns into {}/[] — total, unnoticed data loss)."""
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(obj, f)
+    os.rename(tmp, path)
+
+
 def _now_str():
     """Local wall-clock as 'YYYY-MM-DDTHH:MM:SS' (accurate once NTP-synced)."""
     try:
@@ -205,8 +215,8 @@ class Fri3dFriends(Activity):
         self._banner = None
         self._banner_bg = None
         self._banner_until = 0
+        self._banner_is_arrival = False
         self._alert_names = []
-        self._finishing = False
         self._buzzer = None
         self._dimmed = False
         self._led_next_ms = 0
@@ -224,11 +234,14 @@ class Fri3dFriends(Activity):
         self._contact = {}
         self._exch = ContactExchange()
         self._exchanging = False
+        self._exch_task = None
         self._portal = None
         self._portal_lbl = None
         self._portal_last = None
+        self._portal_next_ms = 0
         self._reload_pending = False
         self._splash_scr = None
+        self._splash_logo = None
         self._splash_task = None
         self._entered = False
         self._pills = []
@@ -271,6 +284,8 @@ class Fri3dFriends(Activity):
             self._banner_ms = int(cfg.get("banner_ms", BANNER_MS_DEFAULT))
         except (TypeError, ValueError):
             self._banner_ms = BANNER_MS_DEFAULT
+        if self._banner_ms < 500:        # 0/negative would hide every banner
+            self._banner_ms = BANNER_MS_DEFAULT
         contact = cfg.get("contact")
         if not isinstance(contact, dict):
             contact = {}
@@ -286,8 +301,7 @@ class Fri3dFriends(Activity):
             with open(APP_DIR + "/config.json", "r") as f:
                 cfg = json.load(f)
             cfg[key] = value
-            with open(APP_DIR + "/config.json", "w") as f:
-                json.dump(cfg, f)
+            _atomic_write_json(APP_DIR + "/config.json", cfg)
         except Exception:
             pass
 
@@ -593,6 +607,10 @@ class Fri3dFriends(Activity):
                 li = lv.image(sp)
                 li.set_src(lv.image_dsc_t({"data_size": len(logo), "data": logo}))
                 li.align(lv.ALIGN.TOP_MID, 0, 100)   # top at y=100 -> bottom ~196
+                # Keep a Python-side reference to the PNG bytes for as long as the
+                # splash image widget lives, so the buffer can't be GC'd out from
+                # under the C binding.
+                self._splash_logo = logo
             except Exception:
                 pass
 
@@ -620,6 +638,15 @@ class Fri3dFriends(Activity):
             self.setContentView(self._scr)
         except Exception:
             pass
+        # The splash is never shown again — free its widgets + the ~8.7 KB PNG
+        # buffer rather than retain them for the app's lifetime.
+        if self._splash_scr is not None:
+            try:
+                self._splash_scr.delete()
+            except Exception:
+                pass
+            self._splash_scr = None
+            self._splash_logo = None
 
     # ------------------------------------------------------------------ UI build
     def _build_idle(self, scr):
@@ -716,14 +743,19 @@ class Fri3dFriends(Activity):
         self._hide_banner()
 
     # ------------------------------------------------------------------ banner
-    def _show_banner(self, text):
+    def _show_banner(self, text, is_arrival=False):
         if self._banner is None or self._banner_bg is None:
             return
         self._banner.set_text(text)
         self._banner_bg.remove_flag(lv.obj.FLAG.HIDDEN)
         self._banner_until = time.ticks_add(time.ticks_ms(), self._banner_ms)
+        self._banner_is_arrival = is_arrival
 
     def _hide_banner(self):
+        # Clear the arrival state too so a later arrival never coalesces into a
+        # stale (minutes-old) name list left over from a previous alert window.
+        self._alert_names = []
+        self._banner_is_arrival = False
         if self._banner_bg is None:
             return
         self._banner_bg.add_flag(lv.obj.FLAG.HIDDEN)
@@ -751,7 +783,7 @@ class Fri3dFriends(Activity):
         hue, freq = _sig_from_id(lowest)
         r, g, b = _hsv(hue)
         self._flash_leds(r, g, b)
-        self._show_banner(self._coalesced_text(arrivals))
+        self._show_banner(self._coalesced_text(arrivals), is_arrival=True)
         self._wake()
         TaskManager.create_task(self._sting(freq))
 
@@ -864,6 +896,7 @@ class Fri3dFriends(Activity):
 
     def onDestroy(self, screen):
         self._stop_task()
+        self._stop_portal()
         self._teardown_ble()
         try:
             if self._buzzer:
@@ -885,6 +918,15 @@ class Fri3dFriends(Activity):
             except Exception:
                 pass
             self._splash_task = None
+        # Cancel an in-flight contact swap too — otherwise it outlives the
+        # Activity by up to 5 s and touches LVGL widgets / BLE on a torn-down app
+        # (the D-1 use-after-free hazard class). run_window re-raises the cancel.
+        if self._exch_task is not None:
+            try:
+                self._exch_task.cancel()
+            except Exception:
+                pass
+            self._exch_task = None
 
     def _teardown_ble(self):
         try:
@@ -901,8 +943,6 @@ class Fri3dFriends(Activity):
                 dt = time.ticks_diff(now, last)
                 last = now
                 self._handle_buttons()
-                if self._finishing:
-                    break
                 # During a contact swap, keep the loop out of the radio's way:
                 # skip the periodic refreshers — especially _update_leds, whose
                 # WS2812 lights.write() disables IRQs and starves the short GATT
@@ -940,10 +980,18 @@ class Fri3dFriends(Activity):
             ev = self._edge(name)
             if not ev:
                 continue
+            # During a swap, keep updating edge state (above) but run NO action:
+            # B's flash/save writes and A's lvgl toggles otherwise starve the
+            # short GATT link (the WS2812 write disables IRQs — field bug 2).
+            if self._exchanging:
+                continue
             self._wake()
             if ev == "y":
-                if not self._exchanging:
-                    TaskManager.create_task(self._do_exchange())
+                # An unconfigured badge has no BLE running (proximity.begin() was
+                # skipped); firing a swap would activate a radio no teardown path
+                # deactivates. Match the README: unconfigured badges don't swap.
+                if not self._unconfigured:
+                    self._exch_task = TaskManager.create_task(self._do_exchange())
             elif ev == "b":
                 self._sound = not self._sound
                 self._save_config("sound", self._sound)
@@ -971,7 +1019,11 @@ class Fri3dFriends(Activity):
         if not arrivals:
             return
         now = time.ticks_ms()
-        if self._banner_until and time.ticks_diff(now, self._banner_until) < 0:
+        # Only coalesce into a banner that is ITSELF an arrival banner still
+        # showing — never into a "Swapped with X ✓" / "Config saved ✓" banner
+        # (that would silently rewrite it and skip the LED flash + sting).
+        if (self._banner_is_arrival and self._banner_until and
+                time.ticks_diff(now, self._banner_until) < 0):
             self._alert_names.extend(arrivals)
             try:
                 self._banner.set_text(self._coalesced_text(self._alert_names))
@@ -1054,8 +1106,9 @@ class Fri3dFriends(Activity):
             self._clock_last = txt
 
     def _resync_time(self, now):
-        # Keep the RTC NTP-synced ~every 10 min while on WiFi (first tick tries
-        # immediately). ntptime.settime() briefly blocks, so run it in a task.
+        # Keep the RTC NTP-synced ~every 10 min while on WiFi (onResume defers the
+        # first sync so it never hitches launch). ntptime.settime() briefly
+        # blocks, so run it off the loop.
         if self._ntp_busy or time.ticks_diff(now, self._next_ntp_ms) < 0:
             return
         self._next_ntp_ms = time.ticks_add(now, NTP_RESYNC_MS)
@@ -1064,12 +1117,17 @@ class Fri3dFriends(Activity):
         self._ntp_busy = True
         # ntptime.settime() is a BLOCKING network call — run it in a thread so it
         # never freezes the asyncio loop (which would stall the UI / an in-flight
-        # contact exchange). Fall back to a task if _thread is unavailable.
+        # contact exchange). Fall back to a task if _thread is unavailable. If
+        # BOTH dispatch paths fail, clear _ntp_busy so resync isn't stuck off
+        # for the rest of the session.
         try:
             import _thread
             _thread.start_new_thread(self._ntp_blocking, ())
         except Exception:
-            TaskManager.create_task(self._ntp_sync())
+            try:
+                TaskManager.create_task(self._ntp_sync())
+            except Exception:
+                self._ntp_busy = False
 
     def _ntp_blocking(self):
         try:
@@ -1133,6 +1191,8 @@ class Fri3dFriends(Activity):
                 self._show_banner("Swapped with %s ✓" % (rec.get("name") or "?"))
             else:
                 self._show_banner("No one swapping nearby")
+        except asyncio.CancelledError:
+            raise            # app exiting mid-swap — don't touch widgets, just unwind
         except Exception:
             try:
                 self._show_banner("Swap failed")
@@ -1140,6 +1200,7 @@ class Fri3dFriends(Activity):
                 pass
         finally:
             self._exchanging = False
+            self._exch_task = None
 
     def _contacts_path(self):
         return APP_DIR + "/contacts.json"
@@ -1156,8 +1217,7 @@ class Fri3dFriends(Activity):
         store = self._load_contacts()
         add_received(store, rec)
         try:
-            with open(self._contacts_path(), "w") as f:
-                json.dump(store, f)
+            _atomic_write_json(self._contacts_path(), store)
         except Exception:
             pass
 
@@ -1190,8 +1250,11 @@ class Fri3dFriends(Activity):
             self._portal = None
 
     def _refresh_portal(self, now):
-        if self._portal_lbl is None:
+        if self._portal_lbl is None or time.ticks_diff(now, self._portal_next_ms) < 0:
             return
+        # The URL path hits the OS/WiFi stack (get_ipv4_address); throttle to ~2 s
+        # like the other refreshers rather than querying every 30 ms frame.
+        self._portal_next_ms = time.ticks_add(now, 2000)
         pin = None
         try:
             pin = self._portal.pending_pin() if self._portal else None

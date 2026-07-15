@@ -111,6 +111,9 @@ Non-connectable legacy advertising, one Manufacturer-Specific AD structure
 - `fnv1a_16(name.strip().lower())` per group; **dedup + sort ascending**; cap at
   `MAX_GROUPS=5`, keeping the lowest ids (deterministic). Collision-tolerant, not
   security. Version byte `0x01`; receivers **drop** unknown versions.
+- Both parsers (`parse_payload` here, `parse_exchange_adv` in `contact_exchange.py`)
+  gate on the 2-byte **company id** (`0xFFFF`) *and* the 4-byte magic before
+  accepting a beacon (was magic-only; tightened in the 2026-07-15 review — F-15).
 - Name UTF-8, truncated on a codepoint boundary to `20 − 2×G` bytes. No Flags AD.
 - **Stable address:** `ble.config("mac") == (0, <6 bytes>)` → addr_type **0 =
   public**, derived from the factory MAC, stable for the session (and across
@@ -341,7 +344,22 @@ half is unit-tested off-device.
   (swapping again with the same badge creates another entry, a fresh snapshot of
   who/what/when), capped at `MAX_CONTACTS=200` (oldest-appended dropped first).
   Each record carries mac, name, fields, rssi, `received_at`
-  (`YYYY-MM-DDTHH:MM:SS` from the NTP-synced RTC) + `received_ticks`.
+  (`YYYY-MM-DDTHH:MM:SS` from the NTP-synced RTC) + `received_ticks`. The write is
+  atomic (temp file + `os.rename`) so a power-off can't corrupt the file — the
+  contacts list is the camp's takeaway artifact.
+- **Rendezvous edge cases** (documented by the 2026-07-15 review, all non-crashing):
+  - *Window-edge overlap (F-16):* everything is bounded by one shared `deadline`, so
+    a rendezvous at ~4.9 s leaves too little time to connect+read+write and fails
+    cleanly (`No one swapping nearby`) — acceptable by design.
+  - *Three badges at once (F-16):* pairing is undefined — `_conn` is a single slot
+    and whichever link event fires last wins; the losers time out gracefully. Camp
+    groups *will* try three-way swaps; do them pairwise for a reliable result.
+  - *Connectable exposure (F-17):* during your 5 s window the beacon is connectable
+    and the server accepts any central, so a nearby scanner (e.g. nRF Connect) could
+    read your `MYINFO` envelope without pressing Y. This is within the deliberate-
+    share trust model (you pressed Y intending to hand this data to whoever's near),
+    but note that "who can read it" is "anyone connecting during the window", not
+    "only a Y-pressing peer".
 - **Verification status:** ✅ pure functions (off-device pytest) **and the real
   two-badge round-trip** — swaps work repeatedly, incl. cross-model 2024↔2026.
   Two field bugs were found + fixed (see changelog 2026-07-13): (1) re-entrancy —
@@ -350,6 +368,14 @@ half is unit-tested off-device.
   guarded, `_mtu_set`/`_svc_ready`); (2) the main loop's `_update_leds()`
   `lights.write()` (IRQ-disabling) starved the short GATT connection — the loop
   now pauses all periodic work while `self._exchanging`.
+- **2026-07-15 review hardening:** the swap task is cancelled on app exit
+  (`run_window` re-raises `CancelledError` through its `finally`, so it can't touch
+  a torn-down Activity — F-4); **Y** is gated on `_unconfigured` so a blank badge
+  never activates an un-torn-down radio (F-5); button A/B actions are deferred while
+  `_exchanging` so a stray press can't fire the starving LED write (F-7); and the
+  client waits for `_IRQ_GATTC_WRITE_DONE` (bounded by the deadline) before
+  disconnecting, instead of a fixed 150 ms nap that raced the ATT round-trip and
+  caused rare one-sided swaps (F-11).
 
 ## 10. WiFi setup portal (`web_portal.py`)
 
@@ -383,6 +409,18 @@ the app's loop; no threads).
   + cycled BLE, which hard-crash/rebooted the badge and leaked memory; the reload
   is now a safe in-place update (see the config-reload bullet above), and a
   "Config saved ✓" banner (badge) + green note (portal) confirm the save.
+- **2026-07-15 review hardening (input handling — the recommended text-entry path):**
+  percent-decoding now rebuilds UTF-8 correctly so accented names/groups survive
+  (was per-byte `chr()` → Latin-1 mojibake, which also made a portal-saved group
+  hash differently from the same name in `config.json` and silently break matching —
+  F-1); `_esc` escapes `'` (attributes are single-quoted, so O'Brien/L'Atelier no
+  longer truncate on re-save — F-2); the POST body is read to full `Content-Length`
+  (was a short-read-prone single `read()` that could drop fields — F-3); `config.json`
+  is written atomically (temp + rename — F-8); `banner_ms` is clamped ≥500 (a 0/neg
+  value would hide every banner — F-12); and the server retries `EADDRINUSE` on
+  restart, only advertises a genuinely-listening URL, closes open connections on
+  `stop()`, times out the request read phase (10 s) and caps the header loop (F-9,
+  F-14). `onDestroy` now also stops the portal (F-13).
 
 Notifications-on-badge and a BLE phone-companion were considered and **dropped**
 (see the plan history): Android notification mirroring would force a native

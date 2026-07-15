@@ -88,6 +88,8 @@ def parse_exchange_adv(adv):
             continue
         if len(field) < 2 + len(X_MAGIC):
             continue
+        if field[:2] != COMPANY_ID:
+            continue            # not our (placeholder) company id
         if field[2:2 + len(X_MAGIC)] != X_MAGIC:
             continue
         rest = field[2 + len(X_MAGIC):]
@@ -237,7 +239,8 @@ class ContactExchange:
         self._role = None
         self._conn = None
         self._received = None      # parsed envelope from the peer
-        self._got_write = False
+        self._got_write = False    # server: peer wrote its envelope to us
+        self._write_done = False   # client: our envelope write was ACKed
         self._done = False
 
     # ---- IRQ: capture events, set flags; keep it short and non-raising ----
@@ -264,6 +267,9 @@ class ContactExchange:
             elif event == E["gattc_read_result"]:
                 conn_handle, value_handle, char_data = data
                 self._received = parse_contact_envelope(bytes(char_data))
+            elif event == E["gattc_write_done"]:
+                # Our envelope write to the server's THEIRS char was ACKed.
+                self._write_done = True
             elif event == E["gatts_write"]:
                 conn_handle, value_handle = data
                 if value_handle == self._h_theirs and self._ble is not None:
@@ -329,6 +335,7 @@ class ContactExchange:
         self._conn = None
         self._received = None
         self._got_write = False
+        self._write_done = False
         self._done = False
         self.dbg = ["start"]
 
@@ -433,6 +440,12 @@ class ContactExchange:
                 except Exception:
                     pass
                 result = await self._run_server(bluetooth, time, asyncio, deadline)
+        except asyncio.CancelledError:
+            # App exiting mid-window: tear the radio down + hand it back through
+            # `finally`, then let the cancellation propagate (don't limp on and
+            # touch a torn-down Activity).
+            self.dbg.append("CANCELLED")
+            raise
         except Exception as e:
             self.dbg.append("EXC %r" % e)
             result = None
@@ -480,7 +493,6 @@ class ContactExchange:
         # Discover the exchange service's characteristics.
         self._h_read_remote = None
         self._h_write_remote = None
-        self._disc = {"chars": []}
         found = await self._discover_client(bluetooth, time, asyncio, deadline)
         self.dbg.append("cli disc=%s r=%s w=%s" % (found, self._h_read_remote, self._h_write_remote))
         if not found:
@@ -494,18 +506,24 @@ class ContactExchange:
         while time.ticks_diff(deadline, time.ticks_ms()) > 0 and self._received is None:
             await asyncio.sleep_ms(20)
         self.dbg.append("cli recv=%s" % (self._received is not None))
+        # Write with response mode (1) and wait for the ACK before disconnecting —
+        # a fixed nap here races the ATT round-trip on a congested radio and the
+        # server would get nothing ("No one swapping nearby") while we kept its
+        # contact: a confusing one-sided swap.
+        self._write_done = False
         try:
             self._ble.gattc_write(self._conn, self._h_write_remote, envelope, 1)
         except Exception:
             pass
-        await asyncio.sleep_ms(150)
+        while time.ticks_diff(deadline, time.ticks_ms()) > 0 and not self._write_done:
+            await asyncio.sleep_ms(20)
+        await asyncio.sleep_ms(30)      # brief grace for the server's gatts_write IRQ
         self._safe_disconnect()
         return self._finalize()
 
     async def _discover_client(self, bluetooth, time, asyncio, deadline):
         # Minimal characteristic discovery: collect (uuid, def_handle, value_handle)
         # via the IRQ, then map our two known UUIDs to their value handles.
-        self._chars = []
         Echar = self._E["gattc_characteristic_result"]
         # Temporarily extend the irq to record characteristics.
         want_read = bluetooth.UUID(MYINFO_CHR)

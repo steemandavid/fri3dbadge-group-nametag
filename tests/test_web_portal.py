@@ -6,7 +6,28 @@ Covers the host-testable half (no asyncio server / sockets needed):
     free-form contact ck[]/cv[] pairing, bad numbers fall back to defaults.
 """
 import web_portal as wp
-from web_portal import parse_form, form_to_config
+from web_portal import parse_form, form_to_config, _url_unquote, _esc
+
+
+def test_url_unquote_utf8_multibyte():
+    # Browsers percent-encode form text as UTF-8 bytes; multi-byte characters
+    # must be reassembled (not turned into Latin-1 mojibake). (F-1)
+    assert _url_unquote("Jos%C3%A9") == "José"
+    assert _url_unquote("caf%C3%A9+%26+No%C3%ABl") == "café & Noël"
+    # A raw (already-decoded) UTF-8 str passes through unchanged.
+    assert _url_unquote("Zoë") == "Zoë"
+
+
+def test_esc_escapes_single_quote():
+    # Every form attribute is single-quoted, so `'` must be escaped. (F-2)
+    assert _esc("O'Brien") == "O&#39;Brien"
+    assert "'" not in _esc("L'Atelier <b>&\"x\"</b>")
+
+
+def test_form_to_config_clamps_banner_ms():
+    # A 0/negative banner_ms would hide every banner -> clamp to the default. (F-12)
+    assert form_to_config(parse_form("banner_ms=0"), {})["banner_ms"] == 5000
+    assert form_to_config(parse_form("banner_ms=-5000"), {})["banner_ms"] == 5000
 
 
 def test_parse_form_basic_and_encoding():

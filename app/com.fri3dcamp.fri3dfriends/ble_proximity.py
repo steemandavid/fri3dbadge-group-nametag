@@ -175,6 +175,8 @@ def parse_payload(adv):
         # Need: company(2) + magic(4) = 6 bytes minimum to even check.
         if len(field) < 2 + len(MAGIC):
             continue
+        if field[:2] != COMPANY_ID:
+            continue            # not our (placeholder) company id
         if field[2:2 + len(MAGIC)] != MAGIC:
             continue
         rest = field[2 + len(MAGIC):]
@@ -433,7 +435,6 @@ class BLEProximity:
                 "rssi": rssi,
                 "rssi_ewma": float(rssi),
                 "last_seen_ms": now,
-                "notified": False,
             }
             self._seen[key] = entry
             self._arrivals.append({

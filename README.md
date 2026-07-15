@@ -80,7 +80,8 @@ Edit **`/apps/com.fri3dcamp.fri3dfriends/config.json`**:
 - **`sound`** — `true`/`false`, whether the arrival buzzer sting plays. Toggled
   with **B** and **persisted** across reboots. Default `true`.
 - **`banner_ms`** — how long the "friend arrived" banner stays on screen, in ms.
-  Default `5000` (5 s).
+  Default `5000` (5 s). Values below `500` are ignored (a `0`/negative would hide
+  every banner) and fall back to the default.
 - **`board`** — optional, `"2024"` or `"2026"` to force the hardware profile
   (otherwise auto-detected). Only needed if autodetection fails.
 - **`contact`** — your "my contact info": a free-form object of `"field":
@@ -102,6 +103,10 @@ view/export the contacts you've received — from a phone or laptop browser.
   *access* only (it's plain HTTP on the local network) — enough for a badge.
 - Pages: **/** (edit config + add/remove contact fields), **/contacts** (received
   contacts with date/time), **/contacts.json** (download/export).
+- **International names work:** accented and non-ASCII names/groups (José, Noël,
+  L'Atelier, …) are handled correctly — type them straight into the form. Edits are
+  written **atomically**, so a battery dying mid-save won't corrupt your config or
+  wipe your received contacts.
 
 ## Swapping contacts (Y button)
 

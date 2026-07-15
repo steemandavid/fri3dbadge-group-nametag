@@ -66,26 +66,34 @@ def _elapsed(since):
 
 
 def _esc(s):
+    # Every form attribute in this module is SINGLE-quoted, so `'` must be
+    # escaped too (else an apostrophe — O'Brien, L'Atelier — closes the value
+    # early and corrupts the field on the next save).
     return (str(s).replace("&", "&amp;").replace("<", "&lt;")
-            .replace(">", "&gt;").replace('"', "&quot;"))
+            .replace(">", "&gt;").replace('"', "&quot;").replace("'", "&#39;"))
 
 
 def _url_unquote(s):
+    # Browsers percent-encode form text as UTF-8 *bytes* (é -> %C3%A9). Decode
+    # each %XX into a byte buffer and utf-8-decode the whole thing once, so
+    # multi-byte characters are reassembled correctly (chr(byte) would yield
+    # Latin-1 mojibake and break group-name hashing/matching).
     s = s.replace("+", " ")
-    out = []
+    out = bytearray()
     i = 0
-    while i < len(s):
+    n = len(s)
+    while i < n:
         c = s[i]
-        if c == "%" and i + 2 < len(s):
+        if c == "%" and i + 2 < n:
             try:
-                out.append(chr(int(s[i + 1:i + 3], 16)))
+                out.append(int(s[i + 1:i + 3], 16))
                 i += 3
                 continue
             except Exception:
                 pass
-        out.append(c)
+        out.extend(c.encode("utf-8"))
         i += 1
-    return "".join(out)
+    return bytes(out).decode("utf-8", "replace")
 
 
 def parse_form(body):
@@ -129,6 +137,8 @@ def form_to_config(form, base):
         cfg["banner_ms"] = int(one("banner_ms", "5000"))
     except (TypeError, ValueError):
         cfg["banner_ms"] = 5000
+    if cfg["banner_ms"] < 500:            # a 0/negative value hides every banner
+        cfg["banner_ms"] = 5000
     # Free-form contact fields: parallel ck[]/cv[] arrays.
     keys = form.get("ck", [])
     vals = form.get("cv", [])
@@ -149,6 +159,8 @@ class WebPortal:
         self._ip_getter = ip_getter          # callable -> ip string or None
         self._server = None
         self._task = None
+        self._bound = False                  # True once start_server has bound the port
+        self._writers = set()                # live connection writers (closed on stop)
         self._pin = None
         self._sessions = {}                  # token -> created ticks
         self._fails = 0
@@ -167,18 +179,39 @@ class WebPortal:
             self._task = None
 
     async def _serve(self):
-        try:
-            self._server = await asyncio.start_server(self._handle, "0.0.0.0", self.port)
-        except Exception:
-            self._server = None
+        # A quick pause->resume can hit EADDRINUSE before the OS frees the port;
+        # retry the bind a few times rather than silently dying with a live-looking
+        # URL on the badge footer. _bound gates url() so the footer only advertises
+        # the portal once it's actually listening.
+        for _ in range(6):
+            try:
+                self._server = await asyncio.start_server(self._handle, "0.0.0.0", self.port)
+                self._bound = True
+                return
+            except Exception:
+                self._server = None
+                self._bound = False
+                try:
+                    await asyncio.sleep_ms(300)
+                except Exception:
+                    pass
 
     def stop(self):
+        self._bound = False
         if self._server is not None:
             try:
                 self._server.close()
             except Exception:
                 pass
             self._server = None
+        # Cancel the accept task and drop any still-open connections (blocked
+        # readers won't hold a handler task + buffers forever).
+        for w in list(self._writers):
+            try:
+                w.close()
+            except Exception:
+                pass
+        self._writers = set()
         if self._task is not None:
             try:
                 self._task.cancel()
@@ -202,6 +235,8 @@ class WebPortal:
         return None
 
     def url(self):
+        if not self._bound:              # not listening yet / bind failed
+            return None
         ip = None
         if self._ip_getter:
             try:
@@ -261,41 +296,69 @@ class WebPortal:
         return None
 
     # ---- request handling ----
-    async def _handle(self, reader, writer):
+    async def _read_body(self, reader, n):
+        # StreamReader.read(n) returns UP TO n bytes (whatever's buffered), so a
+        # body spanning >1 TCP segment needs a loop — otherwise a large save is
+        # silently truncated and its missing fields reset to defaults.
+        buf = bytearray()
+        while len(buf) < n:
+            chunk = await reader.read(n - len(buf))
+            if not chunk:
+                break
+            buf.extend(chunk)
+        return bytes(buf)
+
+    async def _read_request(self, reader):
+        line = await reader.readline()
+        if not line:
+            return None
         try:
-            line = await reader.readline()
-            if not line:
-                return
+            method, path, _ = line.decode().split(" ", 2)
+        except Exception:
+            return None
+        headers = {}
+        count = 0
+        while True:
+            h = await reader.readline()
+            if not h or h in (b"\r\n", b"\n"):
+                break
+            count += 1
+            if count > 64:               # cap headers so a hostile client can't OOM us
+                break
             try:
-                method, path, _ = line.decode().split(" ", 2)
+                k, v = h.decode().split(":", 1)
+                headers[k.strip().lower()] = v.strip()
+            except Exception:
+                pass
+        body = b""
+        try:
+            clen = int(headers.get("content-length", "0"))
+        except (TypeError, ValueError):
+            clen = 0
+        if clen > 0:
+            body = await self._read_body(reader, min(clen, MAX_BODY))
+        return method, path, body, headers.get("cookie", "")
+
+    async def _handle(self, reader, writer):
+        self._writers.add(writer)
+        try:
+            # Bound the whole read phase so an idle/speculative socket that sends
+            # nothing can't pin a handler task + buffers forever.
+            try:
+                req = await asyncio.wait_for(self._read_request(reader), 10)
             except Exception:
                 return
-            headers = {}
-            while True:
-                h = await reader.readline()
-                if not h or h in (b"\r\n", b"\n"):
-                    break
-                try:
-                    k, v = h.decode().split(":", 1)
-                    headers[k.strip().lower()] = v.strip()
-                except Exception:
-                    pass
-            body = b""
-            try:
-                clen = int(headers.get("content-length", "0"))
-            except (TypeError, ValueError):
-                clen = 0
-            if clen > 0:
-                body = await reader.read(min(clen, MAX_BODY))
-
+            if not req:
+                return
+            method, path, body, cookie = req
             saved = "saved=1" in path
             path = path.split("?", 1)[0]
-            cookie = headers.get("cookie", "")
             authed = self._valid_session(cookie)
             await self._route(writer, method, path, body, authed, saved)
         except Exception:
             pass
         finally:
+            self._writers.discard(writer)
             try:
                 await writer.drain()
             except Exception:
@@ -365,9 +428,14 @@ class WebPortal:
     def _save_config(self, form):
         base = self._load_config()
         cfg = form_to_config(form, base)
+        # Write to a temp file then rename (atomic on LittleFS/FAT) so a power-off
+        # mid-write can't leave a half-written config.json that loads as {}.
+        path = self._app_dir + "/config.json"
         try:
-            with open(self._app_dir + "/config.json", "w") as f:
+            tmp = path + ".tmp"
+            with open(tmp, "w") as f:
                 json.dump(cfg, f)
+            os.rename(tmp, path)
         except Exception:
             return False
         if self._on_change:

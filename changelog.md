@@ -1,3 +1,81 @@
+# !Fri3d Friends — v0.6.1: Phase 5 code-review fixes (portal input, swap/teardown robustness) — 2026-07-15
+
+Applied **every finding** from the Phase 5 code review
+(`Code_Review_Phase5_20260715_0731.md`, verdict *PASS WITH NOTES*): 5 MAJOR, 9 MINOR
+and 6 INFO. No redesign — the BLE exchange, re-entrancy fix, starvation fix and
+suspend/resume were already sound; these harden the edges (especially the portal, the
+recommended text-entry path). Bumped to **v0.6.1**; **60 off-device tests green**
+(57 + 3 new for the portal input fixes).
+
+## Portal input handling (MAJOR — corrupted real data through the recommended path)
+- **UTF-8 percent-decoding (F-1):** `_url_unquote` decodes `%XX` into a byte buffer and
+  UTF-8-decodes once, so accented names/groups (José, Noël, café) survive the portal
+  instead of turning into Latin-1 mojibake. Also fixes silent group **mismatch** — a
+  portal-saved group now hashes identically to the same name typed into `config.json`.
+- **Apostrophe escaping (F-2):** `_esc` now escapes `'` (every form attribute is
+  single-quoted), so O'Brien / L'Atelier no longer terminate the attribute early and
+  truncate the field on re-save.
+- **Full-body read (F-3):** POST bodies are read in a loop until `Content-Length` (was a
+  single short-read-prone `read()`), so a large save can't silently drop fields.
+
+## Contact swap + lifecycle (MAJOR)
+- **Cancel swap on exit (F-4):** the exchange task is tracked (`_exch_task`) and
+  cancelled in `_stop_task`; `run_window` and `_do_exchange` re-raise `CancelledError`
+  through their `finally`, so a swap can no longer outlive the Activity by up to 5 s and
+  touch freed LVGL widgets / BLE.
+- **Unconfigured Y-press (F-5):** **Y** is gated on `_unconfigured`, matching the README
+  ("unconfigured badges don't advertise/scan") — no more activating a radio no teardown
+  path deactivates.
+
+## Robustness (MINOR)
+- **Atomic writes (F-8):** `config.json` and `contacts.json` are written via temp file +
+  `os.rename` (atomic on LittleFS/FAT), so a power-off mid-write can't wipe the camp's
+  collected contacts.
+- **Banner coalescing (F-6):** arrivals only coalesce into a live *arrival* banner (not a
+  "Swapped ✓" / "Config saved ✓" one), and `_hide_banner` clears the stale name list —
+  fixes an arrival silently rewriting an unrelated banner with no LED flash / sting.
+- **Buttons paused mid-swap (F-7):** A/B actions are deferred while `_exchanging` (edges
+  still tracked), so a stray B-press can't fire the IRQ-disabling LED write that starves
+  the GATT link.
+- **Write-ack before disconnect (F-11):** the client waits for `_IRQ_GATTC_WRITE_DONE`
+  (bounded by the window deadline) instead of a fixed 150 ms nap, fixing rare one-sided
+  swaps on a congested radio.
+- **Portal hardening (F-9, F-14):** bind retries on `EADDRINUSE`; `url()` / footer only
+  advertise a genuinely-listening portal; open connections close on `stop()`; the request
+  read phase has a 10 s timeout and the header loop is capped.
+- **NTP + banner clamp (F-10, F-12):** a failed NTP dispatch clears `_ntp_busy` (no longer
+  wedges resync for the session); `banner_ms` is clamped ≥500 on load *and* save so a
+  0/negative value can't hide every banner.
+- **`onDestroy` stops the portal (F-13).**
+
+## Cleanup (INFO)
+- **Company id checked (F-15):** both beacon parsers now verify the 2-byte company field
+  (`0xFFFF`) alongside the magic, matching the documented wire format.
+- **Splash freed (F-19):** the splash screen + its ~8.7 KB PNG are deleted once the
+  nametag appears (a Python-side reference to the PNG bytes is kept while the image lives).
+- **Portal refresh throttled (F-20):** the footer URL query (hits the WiFi stack) is gated
+  to ~2 s like the other refreshers, not every 30 ms frame.
+- **Dead code removed (F-18):** `_finishing`, `notified`, `_disc`/`_chars`.
+- **Documented (F-16, F-17):** the 3-badge rendezvous ambiguity and the connectable-window
+  exposure are now written up in DESIGN.md §9.
+
+## Tests
+- Added host tests for `_url_unquote` (multibyte UTF-8), `_esc` (single-quote escaping)
+  and the `banner_ms` clamp. **60/60 green.**
+
+## Docs
+- DESIGN.md §3/§9/§10 updated with the review-fix notes; README refreshed (international
+  names now safe via the portal, atomic contact storage, portal robustness).
+
+## Packaging
+- Built the deterministic release package `dist/com.fri3dcamp.fri3dfriends_0.6.1.mpk`
+  (single top-level `fullname/` folder, stored/uncompressed, fixed `2025-01-01`
+  timestamps, 10 files, no `__pycache__`/`exch.log`/`contacts.json` cruft). Verified the
+  in-package manifest reads version 0.6.1. **Not yet flashed** — to be published via
+  BadgeHub → on-badge AppStore (badges auto-offered the 0.6.0 → 0.6.1 update).
+
+---
+
 # !Fri3d Friends — v0.6.0: BadgeHub packaging, repo rename, MIT license, icon polish — 2026-07-14
 
 Prepared the app for publishing on **BadgeHub.eu** and cleaned up release details.
