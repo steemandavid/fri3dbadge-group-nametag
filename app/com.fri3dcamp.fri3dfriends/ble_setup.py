@@ -423,6 +423,7 @@ class SetupService:
         self._saved_at = None
         self._idle_ms = None                 # active idle window (None = no idle limit)
         self._last_activity = 0              # ticks_ms of the last GATT event
+        self._contacts_cache = None          # contacts.json bytes, cached per paging session
         self._adv = None                     # cached advertising payloads so the
         self._resp = None                    # session can RE-advertise on disconnect
 
@@ -642,7 +643,15 @@ class SetupService:
                 elif vh == self._h.get("cfg"):
                     self._q.append(("cfg", val))
                 elif vh == self._h.get("ctloff"):
-                    self._q.append(("ctloff", val))
+                    # Serve the requested contacts page SYNCHRONOUSLY here, not on
+                    # the loop: the phone's writeValueWithResponse(offset) resolves
+                    # the instant NimBLE ACKs this write, and a fast client (a
+                    # browser) reads the contacts characteristic before the loop's
+                    # _process() would run — so a queued update hands back the
+                    # PREVIOUS page and the reassembled JSON is corrupt. Updating
+                    # the read buffer in the IRQ makes it fresh before that read.
+                    self._serve_contacts(val)
+                    self._q.append(("ctloff", b""))
         except Exception:
             pass
 
@@ -666,6 +675,7 @@ class SetupService:
                 if kind == "connect":
                     self._authed = False
                     self._asm.reset()
+                    self._contacts_cache = None
                     self._write_info(False)
                     self._set_status(ST_IDLE)
                 elif kind == "disconnect":
@@ -742,9 +752,13 @@ class SetupService:
         else:
             self._notify_status(ST_INVALID)
 
-    def _handle_ctloff(self, val):
+    def _serve_contacts(self, val):
+        """Write the requested contacts page into the read characteristic. Called
+        SYNCHRONOUSLY from the IRQ so the buffer is fresh before the phone reads
+        (see the ctloff branch in _irq). The header-offset request (start of a
+        paging session) refreshes the cache; page requests slice the cache so no
+        per-page file I/O happens in the IRQ."""
         if not self._authed:
-            self._notify_status(ST_AUTH_REQUIRED)
             return
         if len(val) >= 2:
             offset = val[0] | (val[1] << 8)
@@ -752,12 +766,20 @@ class SetupService:
             offset = val[0]
         else:
             offset = 0
-        data = self._load_contacts_bytes()
-        page = contacts_response(data, offset)
+        if offset == CONTACTS_HEADER_OFFSET or self._contacts_cache is None:
+            self._contacts_cache = self._load_contacts_bytes()
+        page = contacts_response(self._contacts_cache, offset)
         try:
             self._ble.gatts_write(self._h["contacts"], page)
         except Exception:
             pass
+
+    def _handle_ctloff(self, val):
+        # The page was already written in the IRQ (_serve_contacts); on the loop we
+        # only settle the status characteristic.
+        if not self._authed:
+            self._notify_status(ST_AUTH_REQUIRED)
+            return
         self._set_status(ST_OK)
 
     # ---- GATT read buffers / status ----

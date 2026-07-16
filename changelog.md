@@ -84,6 +84,15 @@ Deployed (sha-verified) and driven end-to-end from the dev host over BLE (`bleak
   stayed "unconfigured" and sat on the QR screen with no explanation. The page
   now validates before writing and shows a clear inline message; the form marks
   both fields required. (`docs/setup/index.html`.)
+- **Bug fixed — web page "retrieve contacts" returned corrupt JSON** (*"expected
+  double-quoted property name…"*). The contacts pager served each page on the asyncio
+  loop (`_process`), but a `writeValueWithResponse(offset)` resolves the instant NimBLE
+  ACKs the write, so a fast client (a browser) read the contacts characteristic **before**
+  the loop updated it and got the **previous** page — the reassembled byte stream was
+  misaligned and failed `JSON.parse`. (The headless `bleak` test passed because Python's
+  round-trip latency hid the race.) The page is now written **synchronously in the IRQ**
+  (`_serve_contacts`, same pattern already used to capture chunks), cached per paging
+  session, so the read buffer is fresh before the phone reads it.
 - **Setup window is now an *idle* timeout, not a fixed 2-min wall clock.** The
   configured-badge window (`SETUP_WINDOW_MS`, 2 min) previously counted down from
   the moment you long-pressed B and ignored activity, so a longer friends-list
