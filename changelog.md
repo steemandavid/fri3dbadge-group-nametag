@@ -45,6 +45,18 @@ Deployed (sha-verified) and driven end-to-end from the dev host over BLE (`bleak
   both `gatts_read`-able — registered together in a single call, exchange first.
 - **Two-badge Y-swap verified working** (owner test) — the shared single
   registration does not disturb the contact exchange.
+- **Bug fixed — the phone setup session tore itself down 3 s after a save,**
+  breaking the web UX: reloading received contacts failed, a follow-up config
+  save failed with *"GATT Server is disconnected"*, and (racing the teardown) a
+  badge could stay on the QR/Configure-me screen instead of switching to the
+  nametag. Root cause: the session force-disconnected the phone `SAVE_GRACE_MS`
+  (3 s) after a save. Now the session **stays alive after a save** — the phone
+  keeps its connection so it can reload contacts / make more edits — and only
+  ends when the **phone disconnects** (then it hands the radio to the proximity
+  beacon), with a 60 s safety cap if the phone vanishes without a clean
+  disconnect. The unconfigured→nametag UI swap still happens immediately on save.
+  Verified on both boards: configure → nametag live, contacts reloaded twice
+  while connected, no premature disconnect, on air after the phone leaves.
 - **Bug fixed — swap stopped working until reboot after an app pause:**
   `proximity.end()` (called from `_teardown_ble` on every onPause/onStop) issues
   `BLE.active(False)`, which — verified on-device — **clears NimBLE's whole gatts

@@ -57,7 +57,11 @@ MAX_CFG_BYTES = 2048           # cap on a reassembled config payload
 CONTACTS_PAGE = 400            # bytes per contacts read page
 CONTACTS_HEADER_OFFSET = 0xFFFF  # client writes this offset to fetch the page header
 
-SAVE_GRACE_MS = 3000           # keep the session up this long after a successful save
+# After a save, KEEP the session alive (so the phone can reload contacts / make
+# more edits) until the phone disconnects. This is only a safety cap so a badge
+# whose phone vanished without a clean disconnect still hands the radio back to
+# the proximity beacon eventually.
+POST_SAVE_MAX_MS = 60000       # end a saved session this long after the save (safety net)
 SETUP_WINDOW_MS = 120000       # configured-badge setup window (2 min)
 SESSION_TICK_MS = 30           # setup session poll cadence (matches the app TICK_MS)
 ADV_INTERVAL_US = 100000       # connectable advertising interval
@@ -532,9 +536,13 @@ class SetupService:
                 if deadline is not None and time.ticks_diff(deadline, time.ticks_ms()) <= 0:
                     self.dbg.append("timeout")
                     break
+                # After a save we DON'T tear down — the phone stays connected so
+                # it can reload contacts / make more edits. The session ends when
+                # the phone disconnects (handled in _process) or, as a safety net
+                # if it vanished without a clean disconnect, after POST_SAVE_MAX_MS.
                 if self._saved_at is not None and \
-                        time.ticks_diff(time.ticks_ms(), self._saved_at) >= SAVE_GRACE_MS:
-                    self.dbg.append("save-grace")
+                        time.ticks_diff(time.ticks_ms(), self._saved_at) >= POST_SAVE_MAX_MS:
+                    self.dbg.append("post-save-max")
                     break
                 await asyncio.sleep_ms(SESSION_TICK_MS)
         except asyncio.CancelledError:
@@ -628,9 +636,17 @@ class SetupService:
                 elif kind == "disconnect":
                     self._authed = False
                     self._asm.reset()
-                    self._write_info(False)
-                    if self._running and self._saved_at is None:
-                        self._advertise()      # become visible again for the next phone
+                    if self._saved:
+                        # Config already saved and the phone left — the user is
+                        # done. End the session so the radio goes back to the
+                        # proximity beacon (or the window's caller).
+                        self.dbg.append("disc-after-save")
+                        self._running = False
+                    else:
+                        # Not configured yet; the phone may reconnect. Stay
+                        # visible (NimBLE dropped advertising on connect).
+                        self._write_info(False)
+                        self._advertise()
                 elif kind == "auth":
                     self._handle_auth(val)
                 elif kind == "cfg":
