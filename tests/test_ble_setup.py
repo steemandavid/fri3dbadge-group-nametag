@@ -218,6 +218,41 @@ def test_build_info_pre_and_post_auth():
     assert post["sound"] is False
 
 
+class _FakeClock:
+    """Minimal MicroPython-style ticks_* shim so window_secs_left is testable
+    on the host (CPython's time module lacks ticks_ms/ticks_diff/ticks_add)."""
+    def __init__(self):
+        self.now = 0
+    def ticks_ms(self):
+        return self.now
+    def ticks_diff(self, a, b):
+        return a - b
+    def ticks_add(self, a, d):
+        return a + d
+
+
+def test_window_secs_left_resets_on_activity(monkeypatch):
+    clock = _FakeClock()
+    monkeypatch.setattr(bs, "time", clock)
+    svc = bs.SetupService(app_dir="/x", exchange=None)
+
+    # No idle limit configured (configure mode) -> None.
+    assert svc.window_secs_left() is None
+
+    svc._idle_ms = 120000
+    svc._last_activity = clock.ticks_ms()
+    assert svc.window_secs_left() == 120           # full window
+
+    clock.now += 30000                             # 30 s of idle time
+    assert svc.window_secs_left() == 90
+
+    svc._last_activity = clock.ticks_ms()          # activity resets the window
+    assert svc.window_secs_left() == 120
+
+    clock.now += 500000                            # long past the window
+    assert svc.window_secs_left() == 0             # clamps at 0, never negative
+
+
 def test_build_setup_adv_layout():
     adv = build_setup_adv("ABCD")
     # Flags AD (len 2, type 0x01, 0x06) then name AD (type 0x09 "Fri3d-ABCD").

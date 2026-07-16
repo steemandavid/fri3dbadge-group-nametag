@@ -1493,7 +1493,15 @@ class Fri3dFriends(Activity):
             self._update_setup_qr(self._overlay_qr, self._overlay_qr_box, url)
             self._set_lbl(self._overlay_code_lbl,
                           ("%s   code %s" % (setup_name(bid), code)) if code else setup_name(bid))
-            secs = time.ticks_diff(self._setup_win_deadline, now) // 1000
+            # The window is an idle timeout that resets on BLE activity, so ask
+            # the session for the true remaining time rather than counting down
+            # from a fixed deadline (which would falsely hit 0 mid-transfer).
+            try:
+                secs = self._setup.window_secs_left()
+            except Exception:
+                secs = None
+            if secs is None:
+                secs = time.ticks_diff(self._setup_win_deadline, now) // 1000
             if secs < 0:
                 secs = 0
             self._set_lbl(self._overlay_count_lbl, "closes in %ds · Y to close" % secs)

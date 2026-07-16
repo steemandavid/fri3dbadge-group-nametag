@@ -62,7 +62,13 @@ CONTACTS_HEADER_OFFSET = 0xFFFF  # client writes this offset to fetch the page h
 # whose phone vanished without a clean disconnect still hands the radio back to
 # the proximity beacon eventually.
 POST_SAVE_MAX_MS = 60000       # end a saved session this long after the save (safety net)
-SETUP_WINDOW_MS = 120000       # configured-badge setup window (2 min)
+# Configured-badge setup window. The window is an *idle* timeout: any GATT
+# activity (auth, config write, contacts-page request) resets it, so an active
+# friends-list transfer or edit never times out mid-flight. SETUP_ABS_CAP_MS is
+# an absolute wall-clock backstop so a forgotten open window still hands the
+# radio back to the proximity beacon eventually.
+SETUP_WINDOW_MS = 120000       # idle timeout for a configured-badge window (2 min)
+SETUP_ABS_CAP_MS = 600000      # absolute cap on a window session (10 min)
 SESSION_TICK_MS = 30           # setup session poll cadence (matches the app TICK_MS)
 ADV_INTERVAL_US = 100000       # connectable advertising interval
 
@@ -415,6 +421,8 @@ class SetupService:
         self._q = []
         self._saved = False
         self._saved_at = None
+        self._idle_ms = None                 # active idle window (None = no idle limit)
+        self._last_activity = 0              # ticks_ms of the last GATT event
         self._adv = None                     # cached advertising payloads so the
         self._resp = None                    # session can RE-advertise on disconnect
 
@@ -469,6 +477,18 @@ class SetupService:
 
     def current_badge_id(self):
         return self._badge_id
+
+    def window_secs_left(self):
+        """Seconds until the idle window closes, given the current activity. The
+        window resets on GATT activity, so this counts down from SETUP_WINDOW_MS
+        of *idle* time. Returns None when there is no idle limit (configure mode
+        on an unconfigured badge)."""
+        if not self._idle_ms:
+            return None
+        left = self._idle_ms - time.ticks_diff(time.ticks_ms(), self._last_activity)
+        if left < 0:
+            left = 0
+        return left // 1000
 
     def _refresh_badge_id(self):
         if self._get_badge_id is not None:
@@ -527,14 +547,26 @@ class SetupService:
             self._advertise()
             self.dbg.append("adv %s" % setup_name(self._badge_id))
 
-            deadline = None
+            # timeout_ms (when given) is an IDLE window: it resets on every GATT
+            # event (see _process bumping self._last_activity). abs_deadline is a
+            # hard backstop so a window can't stay open indefinitely.
+            self._idle_ms = timeout_ms
+            self._last_activity = time.ticks_ms()
+            abs_deadline = None
             if timeout_ms:
-                deadline = time.ticks_add(time.ticks_ms(), timeout_ms)
+                abs_deadline = time.ticks_add(
+                    time.ticks_ms(), max(timeout_ms, SETUP_ABS_CAP_MS))
 
             while self._running:
                 self._process()
-                if deadline is not None and time.ticks_diff(deadline, time.ticks_ms()) <= 0:
-                    self.dbg.append("timeout")
+                now = time.ticks_ms()
+                if self._idle_ms and \
+                        time.ticks_diff(now, self._last_activity) >= self._idle_ms:
+                    self.dbg.append("idle-timeout")
+                    break
+                if abs_deadline is not None and \
+                        time.ticks_diff(abs_deadline, now) <= 0:
+                    self.dbg.append("abs-cap")
                     break
                 # After a save we DON'T tear down — the phone stays connected so
                 # it can reload contacts / make more edits. The session ends when
@@ -626,6 +658,9 @@ class SetupService:
     def _process(self):
         q = self._q
         self._q = []
+        if q:
+            # Any GATT event counts as activity and resets the idle window.
+            self._last_activity = time.ticks_ms()
         for kind, val in q:
             try:
                 if kind == "connect":

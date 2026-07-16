@@ -78,6 +78,21 @@ Deployed (sha-verified) and driven end-to-end from the dev host over BLE (`bleak
   cancelled task's `finally` blindly nulled `_setup_task`, wiping the live task's
   handle (breaking teardown-on-pause + the LED/Y gates + the deferred proximity
   begin). Both wrappers now identity-guard (`asyncio.current_task()`) before clearing.
+- **Web page now requires a name AND at least one group before saving.** A badge
+  only leaves setup once it has both (groups drive proximity matching), but the
+  page let you save a name with no groups — the badge accepted the config yet
+  stayed "unconfigured" and sat on the QR screen with no explanation. The page
+  now validates before writing and shows a clear inline message; the form marks
+  both fields required. (`docs/setup/index.html`.)
+- **Setup window is now an *idle* timeout, not a fixed 2-min wall clock.** The
+  configured-badge window (`SETUP_WINDOW_MS`, 2 min) previously counted down from
+  the moment you long-pressed B and ignored activity, so a longer friends-list
+  transfer got cut off mid-flight. Now **any GATT activity (auth, config write,
+  contacts-page request) resets the window**, with a 10-min absolute backstop
+  (`SETUP_ABS_CAP_MS`) so a forgotten-open window still returns the radio to the
+  beacon. The on-screen "closes in Ns" countdown reads the session's true
+  remaining time (`SetupService.window_secs_left()`) so it no longer falsely
+  hits 0 during an active transfer.
 
 Remaining to try with a real **phone** (not USB — `mpremote`'s raw-REPL entry
 conflicts with active BLE and wedges the USB-CDC, the documented pre-existing

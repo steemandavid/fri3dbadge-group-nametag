@@ -424,11 +424,16 @@ from GitHub Pages, `docs/setup/index.html`) talks GATT straight to the badge —
     unconfigured badge — the README "silent" promise becomes "never runs the
     *proximity* beacon"; it does advertise `Fri3d-XXXX` so a phone can configure
     it). App closed → `beacon_service` keeps the radio off (unchanged).
-  - *Configured badge:* **hold B ≥1.5 s** opens a 2-min window
+  - *Configured badge:* **hold B ≥1.5 s** opens a window
     (`SetupService.run("window", proximity=self._ble, timeout_ms=SETUP_WINDOW_MS)`):
     it `suspend()`s proximity, advertises, shows a create-once overlay (QR + code
     + countdown), and `resume()`s on close/timeout (A/Y close early). START is
     intentionally unused; long-press B is board-agnostic (short B still mutes).
+    `timeout_ms` is an **idle** window (2 min): any GATT event resets it (see
+    `_process` bumping `_last_activity`), so a long friends-list transfer never
+    times out mid-flight; `SETUP_ABS_CAP_MS` (10 min) is an absolute backstop. The
+    overlay countdown reads `SetupService.window_secs_left()` for the true remaining
+    idle time rather than a fixed deadline.
   - The main loop skips LED writes / scan while a setup session runs (a WS2812
     `lights.write()` disables IRQs and would starve the GATT link — same rule as
     the swap window). Y-swap is gated off while a session/window is active.
