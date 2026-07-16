@@ -45,6 +45,19 @@ Deployed (sha-verified) and driven end-to-end from the dev host over BLE (`bleak
   both `gatts_read`-able — registered together in a single call, exchange first.
 - **Two-badge Y-swap verified working** (owner test) — the shared single
   registration does not disturb the contact exchange.
+- **Bug fixed — swap stopped working until reboot after an app pause:**
+  `proximity.end()` (called from `_teardown_ble` on every onPause/onStop) issues
+  `BLE.active(False)`, which — verified on-device — **clears NimBLE's whole gatts
+  table and MTU**. Our `_svc_ready` flag persisted, so the next swap reused now-
+  dead handles and `gatts_write` raised `OSError(22)` (EINVAL) → the swap failed
+  silently (`write-exc` in `exch.log`) forever until reboot. `ContactExchange.
+  ensure_radio` now self-heals: it probes the cached handle with a **write** (a
+  *read* spuriously succeeds on a stale handle on this build — only writes EINVAL)
+  and, if dead, resets `_svc_ready`/`_mtu_set` and re-registers. Re-registration
+  and re-`config(mtu=)` ARE allowed after an `active(False)`/`active(True)` cycle
+  (also verified on-device), even though they EINVAL without one. Confirmed by
+  reproducing the exact failure and then a clean two-badge swap after forcing the
+  active cycle on both.
 - **Bug fixed — session went invisible after the first phone left:** NimBLE stops
   advertising on connect and doesn't auto-resume; the setup session now
   **re-advertises on disconnect** (verified: badge reappears after a client drops).

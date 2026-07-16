@@ -327,6 +327,32 @@ class ContactExchange:
                 self._ble.active(True)
         except Exception as e:
             self.dbg.append("active-exc %r" % e)
+        # Self-heal a stale GATT registration. BLE.active(False) — which
+        # proximity.end() issues on every app onPause/onStop — CLEARS NimBLE's
+        # gatts table and MTU, but our _svc_ready flag persisted, so the cached
+        # handles are now dead and gatts_write would OSError(22) (EINVAL) on the
+        # next swap (the "swap stops working until reboot" bug). Probe the cached
+        # handle with a WRITE (a read spuriously succeeds on a stale handle on
+        # this build — only writes EINVAL); if it's dead, reset so we re-register
+        # below. Re-registration (and re-setting the MTU) IS permitted after an
+        # active(False)/active(True) cycle — verified on-device — even though it
+        # EINVALs without one. run_window overwrites _h_myinfo with the real
+        # envelope right after, so the probe byte is never advertised.
+        if self._svc_ready:
+            stale = False
+            try:
+                self._ble.gatts_write(self._h_myinfo, b"\x00")
+            except Exception:
+                stale = True
+            if stale:
+                self.dbg.append("svc-stale")
+                self._svc_ready = False
+                self._mtu_set = False
+                if self._setup is not None:
+                    try:
+                        self._setup.on_radio_off()
+                    except Exception:
+                        pass
         if not self._mtu_set:
             try:
                 self._ble.config(mtu=GATT_MTU)

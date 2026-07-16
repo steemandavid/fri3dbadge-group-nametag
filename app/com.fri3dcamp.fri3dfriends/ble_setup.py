@@ -435,6 +435,13 @@ class SetupService:
             ),
         )
 
+    def on_radio_off(self):
+        """The radio was deactivated (BLE.active(False)), which clears NimBLE's
+        gatts table — our handles are now stale. Drop them so a fresh
+        registration (via ContactExchange.ensure_radio) rebinds them."""
+        self._h = {}
+        self._ble = None
+
     def bind_handles(self, ble, handles):
         """Receive the setup service's value handles (registration order) and
         size the read buffers. Called once by ContactExchange._ensure_services."""
