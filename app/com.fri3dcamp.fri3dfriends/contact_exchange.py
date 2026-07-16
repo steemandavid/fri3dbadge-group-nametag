@@ -230,6 +230,7 @@ class ContactExchange:
         self._ble = None
         self._svc_ready = False
         self._mtu_set = False    # config(mtu=) is one-time-only; re-setting EINVALs
+        self._setup = None       # optional SetupService, registered in the SAME call
         self._h_myinfo = None
         self._h_theirs = None
         # event constants seeded in run_window()
@@ -302,27 +303,74 @@ class ContactExchange:
             "mtu_exchanged": g("_IRQ_MTU_EXCHANGED", 21),
         }
 
-    def _ensure_service(self, bluetooth):
-        """Register the exchange GATT service once and cache value handles."""
+    def attach_setup(self, setup):
+        """Attach a SetupService (ble_setup.SetupService) so its GATT service is
+        registered in the SAME gatts_register_services call as the exchange
+        service. NimBLE accepts that call only ONCE per power-on, so both
+        features must register together or the second one EINVALs until reboot."""
+        self._setup = setup
+
+    def ensure_radio(self, bluetooth):
+        """Bring BLE up, set the MTU once, register both services once. The
+        single entry point used by BOTH run_window() and SetupService.run() so
+        there is exactly one registration site. Returns the BLE instance (or
+        None). Does NOT install an IRQ handler — each owner installs its own."""
+        try:
+            self._ble = bluetooth.BLE()
+        except Exception as e:
+            self.dbg.append("BLE-exc %r" % e)
+            self._ble = None
+        if self._ble is None:
+            return None
+        try:
+            if not self._ble.active():
+                self._ble.active(True)
+        except Exception as e:
+            self.dbg.append("active-exc %r" % e)
+        if not self._mtu_set:
+            try:
+                self._ble.config(mtu=GATT_MTU)
+                self._mtu_set = True
+            except Exception as e:
+                self.dbg.append("mtu-exc %r" % e)
+        try:
+            self._ensure_services(bluetooth)
+        except Exception as e:
+            self.dbg.append("svc-exc %r" % e)
+        return self._ble
+
+    def _ensure_services(self, bluetooth):
+        """Register the exchange GATT service — and the setup service if one is
+        attached — in ONE gatts_register_services call, then cache/hand out the
+        value handles."""
         if self._svc_ready:
             return
         F_READ = getattr(bluetooth, "FLAG_READ", 0x02)
         F_WRITE = getattr(bluetooth, "FLAG_WRITE", 0x08)
         F_WRITE_NR = getattr(bluetooth, "FLAG_WRITE_NO_RESPONSE", 0x04)
         UUID = bluetooth.UUID
-        svc = (
+        exch_svc = (
             UUID(SVC_UUID),
             (
                 (UUID(MYINFO_CHR), F_READ),
                 (UUID(THEIRS_CHR), F_WRITE | F_WRITE_NR),
             ),
         )
-        ((self._h_myinfo, self._h_theirs),) = self._ble.gatts_register_services((svc,))
+        services = [exch_svc]
+        if self._setup is not None:
+            services.append(self._setup.service_tuple(bluetooth))
+        handles = self._ble.gatts_register_services(tuple(services))
+        (self._h_myinfo, self._h_theirs) = handles[0]
         try:
             self._ble.gatts_set_buffer(self._h_myinfo, MAX_CONTACT_BYTES + 100, True)
             self._ble.gatts_set_buffer(self._h_theirs, MAX_CONTACT_BYTES + 100, True)
         except Exception:
             pass
+        if self._setup is not None:
+            try:
+                self._setup.bind_handles(self._ble, handles[1])
+            except Exception as e:
+                self.dbg.append("setup-bind-exc %r" % e)
         self._svc_ready = True
 
     async def run_window(self, proximity, my_name, my_contact):
@@ -354,34 +402,17 @@ class ContactExchange:
             # services), and re-issuing them on a 2nd exchange raises OSError(22)
             # EINVAL. Guarding + one-shot flags makes run_window fully re-entrant
             # (previously the exchange worked once per launch, then EINVAL'd).
-            try:
-                self._ble = bluetooth.BLE()
-            except Exception as e:
-                self.dbg.append("BLE-exc %r" % e)
-                self._ble = None
+            # ONE registration site: ensure_radio brings BLE up, sets the MTU
+            # once and registers exchange+setup services in one call.
+            self.ensure_radio(bluetooth)
             if self._ble is None:
                 return None
             self.dbg.append("BLE()")
-            try:
-                if not self._ble.active():
-                    self._ble.active(True)
-            except Exception as e:
-                self.dbg.append("active-exc %r" % e)
-            if not self._mtu_set:
-                try:
-                    self._ble.config(mtu=GATT_MTU)
-                    self._mtu_set = True
-                except Exception as e:
-                    self.dbg.append("mtu-exc %r" % e)
             self._seed_events(bluetooth)
             try:
                 self._ble.irq(self._irq)
             except Exception as e:
                 self.dbg.append("irq-exc %r" % e)
-            try:
-                self._ensure_service(bluetooth)
-            except Exception as e:
-                self.dbg.append("svc-exc %r" % e)
             try:
                 self._ble.gatts_write(self._h_myinfo, envelope)
             except Exception as e:

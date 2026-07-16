@@ -85,9 +85,9 @@ app/com.fri3dcamp.fri3dfriends/   → deployed to /apps/com.fri3dcamp.fri3dfrien
   MANIFEST.JSON        MicroPythonOS app manifest (launcher intent)
   fri3d_friends.py     the Activity (UI, alerts, buttons, lifecycle)
   ble_proximity.py     BLE advertise/scan + group-aware state machine
-  contact_exchange.py  Y-button connectable-GATT contact swap
-  web_portal.py        PIN-gated on-badge config/contacts web portal
-  config.json          per-group/member config (edit via the portal)
+  contact_exchange.py  Y-button connectable-GATT contact swap (+ shared service registration)
+  ble_setup.py         Web-Bluetooth phone-setup GATT service (config/contacts)
+  config.json          per-group/member config (edit from the phone setup page)
   fri3dfriends.png     !Fri3d Friends splash logo   |  icon_64x64.png  launcher icon
   montserrat_name.ttf  42px name font (subset TTF)
 tests/
@@ -96,6 +96,8 @@ tests/
 tools/
   host_advertise.py    BlueZ D-Bus LE advertiser (test harness: acts as a 2nd badge)
   pull_file.py         pull a binary file off the badge via chunked base64
+  setup_client.py      bleak GATT client for the setup service (headless test/scripting)
+docs/setup/index.html  the Web-Bluetooth setup page (GitHub Pages)
 ```
 
 ## 3. BLE protocol (PLAN §6, unchanged in design)
@@ -377,72 +379,76 @@ half is unit-tested off-device.
   disconnecting, instead of a fixed 150 ms nap that raced the ATT round-trip and
   caused rare one-sided swaps (F-11).
 
-## 10. WiFi setup portal (`web_portal.py`)
+## 10. BLE phone setup (`ble_setup.py` + `docs/setup/index.html`, v0.8.0)
 
-Assumes the badge is **already on WiFi** (OS auto-connect) — the app does not
-manage STA/hotspot, it just reads `WifiService.get_ipv4_address()` and serves.
-Always-on while the app is foreground (`_start_portal` in `onResume`, `_stop_
-portal` in `onPause`/`onStop`). The built-in `WebServer` is only a WebREPL bridge,
-so this is a small custom HTTP server on `asyncio.start_server` (cooperative with
-the app's loop; no threads).
+Replaces the old WiFi web portal (`web_portal.py`, removed in v0.8.0). At Fri3d
+Camp the badges join a **separate SSID/subnet** from phones, so an HTTP portal by
+IP is unreachable in practice. Instead a **static Web-Bluetooth page** (served
+from GitHub Pages, `docs/setup/index.html`) talks GATT straight to the badge —
+**zero network**. iOS Safari lacks Web Bluetooth; iPhone users use the free
+**Bluefy** browser (the page detects `!navigator.bluetooth` on iOS and links it).
 
-- **Routes:** `GET /` (config form + dynamic `contact` key/value editor),
-  `POST /save` (writes `config.json`, fires an app reload), `GET /contacts`
-  (table), `GET /contacts.json` (export). Form helpers `parse_form` /
-  `form_to_config` are pure + unit-tested.
-- **Auth = badge-displayed PIN** (pairing model for an always-on server on a
-  shared camp LAN): a random 5-digit PIN per boot, entered once → signed session
-  cookie (`SESSION_TTL_MS`); ≥5 wrong tries → brief lockout + PIN rotation. The
-  nametag footer shows `⚙ http://<ip>:8080`, and surfaces the PIN as a challenge
-  (`portal PIN: …`) when an unauthenticated request arrives (`pending_pin()`).
-  Plain HTTP → the PIN gates *access*, not traffic; acceptable badge trust model.
-- **Config reload:** `on_change` sets a flag consumed on the main loop
-  (`_apply_reload`), which does a **safe in-place reload only** — reload config +
-  `set_text` the name/controls + show a "Config saved ✓" banner. It deliberately
-  does **not** rebuild or re-submit the screen: deleting the active screen (with
-  its scrolling labels) hard-crashes + reboots the badge on this build, and a
-  second `setContentView` re-fires this same Activity's onPause/onResume
-  mid-update. So name/contact/runtime settings apply live; group pill and on-air
-  beacon *changes* (while already configured) update on the next app start.
-- **First-time configure (v0.6.3 + v0.7.2):** when a portal save flips the badge
-  from unconfigured → configured, `_apply_reload` additionally **starts BLE
-  live** (the Y-gate reads `_unconfigured` live and would otherwise open onto a
-  dead radio) and calls `_swap_setup_for_nametag()`: the setup widgets (title,
-  subtitle, QR tile — tracked in `_setup_widgets`) are **hidden, never
-  deleted**, the nametag widgets are **created in place** on the same live
-  screen (`_build_idle` is split into `_build_setup` / `_build_nametag` +
-  shared clock/portal/controls/banner built once), and the banner is re-raised
-  via `move_foreground()`. Widget *creation* on a live screen is safe;
-  *deletion* and screen swaps are the crash classes. Verified on-device: the
-  badge switches Configure-me → nametag on save, no reboot, and immediately
-  alerts on nearby friends.
-- **Configure-me QR (v0.7.1):** the unconfigured screen shows an `lv.qrcode`
-  (built into the OS's LVGL) of the portal URL on a white 136 px tile (margin =
-  quiet zone), updated/hidden by `_refresh_portal`'s 2 s throttle as WiFi
-  comes and goes; degrades to the text URL if `lv.qrcode` is absent.
-- **Verification status:** ✅ confirmed end-to-end on-device — footer URL,
-  PIN login, editing config, and saving all work from a browser. A field bug was
-  fixed (changelog 2026-07-13): the old save-reload rebuilt the whole LVGL screen
-  + cycled BLE, which hard-crash/rebooted the badge and leaked memory; the reload
-  is now a safe in-place update (see the config-reload bullet above), and a
-  "Config saved ✓" banner (badge) + green note (portal) confirm the save.
-- **2026-07-15 review hardening (input handling — the recommended text-entry path):**
-  percent-decoding now rebuilds UTF-8 correctly so accented names/groups survive
-  (was per-byte `chr()` → Latin-1 mojibake, which also made a portal-saved group
-  hash differently from the same name in `config.json` and silently break matching —
-  F-1); `_esc` escapes `'` (attributes are single-quoted, so O'Brien/L'Atelier no
-  longer truncate on re-save — F-2); the POST body is read to full `Content-Length`
-  (was a short-read-prone single `read()` that could drop fields — F-3); `config.json`
-  is written atomically (temp + rename — F-8); `banner_ms` is clamped ≥500 (a 0/neg
-  value would hide every banner — F-12); and the server retries `EADDRINUSE` on
-  restart, only advertises a genuinely-listening URL, closes open connections on
-  `stop()`, times out the request read phase (10 s) and caps the header loop (F-9,
-  F-14). `onDestroy` now also stops the portal (F-13).
+- **One radio, one registration.** NimBLE accepts `gatts_register_services` only
+  **once per power-on**, so the setup service is registered **in the same call**
+  as the contact-exchange service: `ContactExchange.ensure_radio()` /
+  `_ensure_services()` build both service tuples, register them together, and
+  hand the setup value handles to `SetupService.bind_handles()`. `ensure_radio()`
+  is the single site that brings BLE up + sets the MTU once (515) + registers —
+  used by both `run_window()` (swap) and `SetupService.run()` (setup).
+- **GATT service** (`SETUP_SVC 6e400020-…`, Nordic-UART-derived base):
+  `AUTH`(w) 4-digit code · `INFO`(r) pre-auth `{"v":1,"badge":"XXXX","authed":false}`
+  / post-auth full config JSON · `CFG`(w) chunked config · `STATUS`(r+notify)
+  last-op code · `CONTACTS`(r) one page · `CTLOFF`(w) u16-LE page offset.
+- **Auth = badge-displayed code** (pairing model): a random 4-digit code per
+  session shown on screen; per-connection auth; ≥5 wrong → 60 s lockout + code
+  rotation (`AuthState`, ported from the portal's `_new_pin`/lockout). All chars
+  except `AUTH`/pre-auth `INFO` answer `auth_required` until authed.
+- **CFG framing:** each write is `seq:u8 | total:u8 | payload`. `ChunkAssembler`
+  reassembles (cap 2048 → `too_large`); on the last chunk → `json.loads` →
+  `sanitize_config(dict, base)` (the pure BLE equivalent of `form_to_config`) →
+  atomic `config.json` write → fire the app's `_reload_config()` → `STATUS ok`
+  + notify. Any failure → `invalid`/`too_large`/`auth_required`; state unchanged.
+- **Contacts read (paging):** client writes offset `0xFFFF` → `CONTACTS` returns
+  `{"len":N,"page":400}`; then offset 0,400,… → 400-byte slices of
+  `contacts.json`. Client reassembles + `JSON.parse` + downloads. `contacts_response`
+  is pure + unit-tested.
+- **Advertising (setup mode):** connectable, `adv_data` = flags + complete local
+  name `Fri3d-XXXX` (`XXXX` = last 2 bytes of the BLE MAC, uppercase — stable per
+  board); the 128-bit service UUID goes in `resp_data`. The page filters
+  `requestDevice` by that exact name so the chooser shows exactly one badge. The
+  QR the badge shows encodes `…/setup/?badge=XXXX`.
+- **When setup runs (security = radio discipline):**
+  - *Unconfigured, app open (Configure-me screen):* `SetupService.run("configure")`
+    advertises + serves GATT for the whole screen (no proximity beacon runs on an
+    unconfigured badge — the README "silent" promise becomes "never runs the
+    *proximity* beacon"; it does advertise `Fri3d-XXXX` so a phone can configure
+    it). App closed → `beacon_service` keeps the radio off (unchanged).
+  - *Configured badge:* **hold B ≥1.5 s** opens a 2-min window
+    (`SetupService.run("window", proximity=self._ble, timeout_ms=SETUP_WINDOW_MS)`):
+    it `suspend()`s proximity, advertises, shows a create-once overlay (QR + code
+    + countdown), and `resume()`s on close/timeout (A/Y close early). START is
+    intentionally unused; long-press B is board-agnostic (short B still mutes).
+  - The main loop skips LED writes / scan while a setup session runs (a WS2812
+    `lights.write()` disables IRQs and would starve the GATT link — same rule as
+    the swap window). Y-swap is gated off while a session/window is active.
+- **First-time configure (v0.6.3 → v0.8.0):** when a save flips the badge
+  unconfigured → configured, `_apply_reload` calls `_swap_setup_for_nametag()`
+  (setup widgets **hidden, never deleted**; nametag widgets **created in place**
+  on the same live screen; banner re-raised via `move_foreground()`) and sets
+  `_pending_begin`. Proximity `begin()` is deferred to the main loop until the
+  setup session has **fully torn down** (`_setup_task is None`), so the setup
+  advertising and the proximity beacon never run at once. Widget *creation* on a
+  live screen is safe; *deletion* and second `setContentView` are the crash
+  classes (see `_enter_main`).
+- **Pure/host-tested:** `sanitize_config`, `ChunkAssembler`, `contacts_response`,
+  `AuthState`, `badge_id`/`build_info`/`build_setup_adv` — `tests/test_ble_setup.py`.
+  The radio half is exercised end-to-end by `docs/setup/index.html` (Chrome /
+  Bluefy) and headlessly by `tools/setup_client.py` (`bleak`).
 
-Notifications-on-badge and a BLE phone-companion were considered and **dropped**
-(see the plan history): Android notification mirroring would force a native
-companion app, and BLE Web-Bluetooth config excludes iOS Safari — the always-on
-WiFi portal reaches every phone.
+Notifications-on-badge and a personal-hotspot fallback were considered and
+**dropped** (see the plan history and `Implementation_Plan_BLE_Setup_20260716.md`):
+the iOS trade-off (Bluefy) is accepted because a WiFi portal is simply unreachable
+across the camp's split SSIDs.
 
 ## 12. Background beacon service (`beacon_service.py`, v0.7.0)
 

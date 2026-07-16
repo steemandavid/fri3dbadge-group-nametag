@@ -1,3 +1,61 @@
+# !Fri3d Friends — v0.8.0: phone setup over Bluetooth (Web Bluetooth); WiFi portal removed — 2026-07-16
+
+At Fri3d Camp badges and phones sit on **different SSIDs/subnets**, so the old
+PIN'd WiFi portal was unreachable by IP in practice. v0.8.0 replaces it with a
+**Web-Bluetooth setup page** (`docs/setup/index.html`, GitHub Pages) that talks
+GATT straight to the badge — **zero network**. iOS Safari has no Web Bluetooth, so
+iPhone users use the free **Bluefy** browser (the page detects iOS and links it).
+
+## What changed
+- **New `ble_setup.py`** — a connectable setup GATT service (`SETUP_SVC 6e400020-…`):
+  `AUTH`(4-digit code) · `INFO`(pre/post-auth JSON) · `CFG`(chunked config) ·
+  `STATUS`(read+notify) · `CONTACTS`(paged read) · `CTLOFF`(page offset). Pure,
+  host-tested halves: `sanitize_config` (the BLE `form_to_config`), `ChunkAssembler`
+  (`seq|total|payload`, 2048-byte cap → `too_large`), `contacts_response` (0xFFFF
+  header + 400-byte slices), `AuthState` (4-digit + 60 s lockout/rotation),
+  `badge_id`/`build_info`/`build_setup_adv`. 25 new tests (`tests/test_ble_setup.py`).
+- **One radio, one registration.** NimBLE accepts `gatts_register_services` once per
+  power-on, so the setup service is registered **in the same call** as the contact-
+  exchange service. `ContactExchange.ensure_radio()`/`_ensure_services()` build both
+  and hand the setup handles to `SetupService.bind_handles()`; `ensure_radio` is the
+  single BLE-up + MTU-once + register-once site used by both swap and setup.
+- **Badge identity `Fri3d-XXXX`** (last 2 bytes of the BLE MAC). The QR encodes
+  `…/setup/?badge=XXXX` so the browser chooser shows exactly this badge.
+- **App wiring:** unconfigured badge runs the setup service on the Configure-me
+  screen (new QR + on-screen code); a configured badge opens a **2-min window with
+  a long press of B** (short B still mutes; A/Y close early), with a create-once
+  overlay (QR + code + countdown), suspending/resuming proximity like the Y-swap.
+  Y-swap and LED writes are gated off while a setup session runs.
+- **Removed** `web_portal.py` + `tests/test_web_portal.py`; README/DESIGN §10 rewritten.
+- **New `tools/setup_client.py`** (bleak) — the same protocol, headless, for testing.
+
+## On-hardware verification (2024 badge #1, this session) + two bugs fixed
+Deployed (sha-verified) and driven end-to-end from the dev host over BLE (`bleak`):
+- unconfigured → phone-configured over BLE → badge **switches to the nametag live
+  and goes on the air, NO reboot** (config `"BLE Test ✓ José"` round-tripped —
+  UTF-8 preserved through chunked GATT + `sanitize_config` + atomic write);
+- **contacts paging** exact (4 pages / 1395 bytes / 6 contacts byte-identical);
+- **wrong-code lockout** (5th → `locked`, code rotated) matches the old portal;
+- **setup window** on a configured badge opens, **suspends proximity, advertises,
+  shows the overlay, and resumes proximity on close**; exchange service still
+  registered (`svc_ready`) alongside setup.
+- **Bug fixed — session went invisible after the first phone left:** NimBLE stops
+  advertising on connect and doesn't auto-resume; the setup session now
+  **re-advertises on disconnect** (verified: badge reappears after a client drops).
+- **Bug fixed — setup task handle clobbered:** the splash→main `setContentView`
+  re-fires `onPause`/`onResume`, cancelling+restarting the configure session; the
+  cancelled task's `finally` blindly nulled `_setup_task`, wiping the live task's
+  handle (breaking teardown-on-pause + the LED/Y gates + the deferred proximity
+  begin). Both wrappers now identity-guard (`asyncio.current_task()`) before clearing.
+
+Still to verify with **physical** badge access (both test badges are USB-CDC wedged
+after the session — the documented pre-existing hazard, irrelevant untethered):
+window-mode GATT via a real phone (host BlueZ served a stale cache), a two-badge
+Y-swap regression after a setup session, the 2026 board, and iPhone/Bluefy.
+Backups of both badges' original `config.json` were kept and can be restored on replug.
+
+---
+
 # !Fri3d Friends — v0.7.2: first-time portal save now switches to the nametag live — 2026-07-15
 
 ## Deploy/ops notes (learned 2026-07-15/16, all three badges on 0.7.2)

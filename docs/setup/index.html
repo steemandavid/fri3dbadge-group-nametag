@@ -1,0 +1,412 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>!Fri3d Friends — badge setup</title>
+<!--
+  Static Web-Bluetooth setup page for the "!Fri3d Friends" badge app.
+  ONE self-contained file (inline CSS + JS, no frameworks, no build step),
+  served from GitHub Pages (repo Settings -> Pages -> main branch, /docs folder):
+    https://steemandavid.github.io/fri3d-friends/setup/?badge=XXXX
+  It talks GATT straight to the badge — zero network needed. The badge shows a
+  4-digit code; enter it to unlock. See app/.../ble_setup.py for the protocol.
+-->
+<style>
+  :root{
+    --bg:#0b0e14; --panel:#121826; --card:#162033; --line:#28324a;
+    --text:#e6e6e6; --muted:#8fa8b8; --dim:#6a7280;
+    --accent:#ffe066; --accent2:#7fb2ff; --ok:#2dd36b; --bad:#f4534a; --hint:#ff8c42;
+  }
+  *{box-sizing:border-box}
+  body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;
+    max-width:560px;margin:0 auto;padding:16px;background:var(--bg);color:var(--text)}
+  h1{font-size:1.4rem;color:var(--accent);margin:.2rem 0}
+  h2{font-size:1.05rem;color:var(--accent);margin:1.2rem 0 .4rem;border-bottom:1px solid var(--line);padding-bottom:4px}
+  a{color:var(--accent2)}
+  .sub{color:var(--muted);font-size:.9rem;margin:.2rem 0 1rem}
+  label{display:block;font-size:.82rem;color:var(--muted);margin-top:10px}
+  input[type=text],input[type=number],input[type=tel]{width:100%;padding:10px;margin-top:4px;
+    background:var(--card);color:#fff;border:1px solid var(--line);border-radius:8px;font-size:1rem}
+  button{padding:11px 16px;margin:10px 6px 0 0;background:#143a2a;color:#fff;
+    border:1px solid var(--accent);border-radius:9px;font-size:1rem;cursor:pointer}
+  button.secondary{background:var(--card);border-color:var(--line)}
+  button:disabled{opacity:.45;cursor:not-allowed}
+  .row{display:flex;gap:6px;align-items:center;margin-top:6px}
+  .row input{flex:1;margin-top:0}
+  .row button{margin:0;padding:8px 10px}
+  .muted{color:var(--dim);font-size:.82rem}
+  .hidden{display:none}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px;margin-top:12px}
+  .badgechip{display:inline-block;background:var(--card);border:1px solid var(--line);
+    border-radius:20px;padding:3px 12px;font-weight:600;color:var(--accent)}
+  #status{margin-top:12px;padding:10px;border-radius:8px;font-size:.9rem;min-height:1.2rem}
+  .s-ok{background:#143a2a;border:1px solid var(--ok);color:#9fe0a0}
+  .s-bad{background:#3a1414;border:1px solid var(--bad);color:#f0a7a2}
+  .s-info{background:var(--card);border:1px solid var(--line);color:var(--muted)}
+  table{width:100%;border-collapse:collapse;margin-top:8px}
+  td,th{border-bottom:1px solid var(--line);padding:7px 6px;text-align:left;font-size:.88rem;vertical-align:top}
+  th{color:var(--muted);font-weight:600}
+  .tabs{display:flex;gap:6px;margin-top:14px}
+  .tabs button{flex:1;margin:0}
+  .tabs button.active{background:#143a2a;border-color:var(--accent)}
+  .checkbox{display:flex;align-items:center;gap:8px;margin-top:12px}
+  .checkbox input{width:auto}
+  code{background:var(--card);padding:1px 5px;border-radius:4px}
+</style>
+</head>
+<body>
+
+<h1>!Fri3d Friends</h1>
+<div class="sub">Set up your badge from your phone — over Bluetooth, no WiFi needed.</div>
+
+<!-- Unsupported-browser hint (iOS Safari / desktop without Web Bluetooth) -->
+<div id="unsupported" class="panel hidden">
+  <b>This browser can't do Web Bluetooth.</b>
+  <div id="ios-hint" class="hidden">
+    <p>On iPhone/iPad, open this page in the free <b>Bluefy</b> browser:</p>
+    <p><a id="bluefy-store" href="https://apps.apple.com/app/bluefy-web-ble-browser/id1492822055">Get Bluefy on the App Store</a></p>
+    <p><a id="bluefy-open" href="#">Open this page in Bluefy →</a></p>
+  </div>
+  <div id="desktop-hint" class="hidden">
+    <p>Use <b>Chrome</b> or <b>Edge</b> (desktop or Android). Firefox and Safari
+    don't support Web Bluetooth.</p>
+  </div>
+</div>
+
+<!-- Connect -->
+<div id="connect-panel" class="panel">
+  <div>Badge: <span id="badge-label" class="badgechip">any</span></div>
+  <p class="muted" id="connect-hint">Tap Connect, then pick your badge from the list.</p>
+  <button id="connect-btn">🔗 Connect to badge</button>
+</div>
+
+<!-- Auth -->
+<div id="auth-panel" class="panel hidden">
+  <label for="code">4-digit code shown on the badge screen</label>
+  <input id="code" type="tel" inputmode="numeric" maxlength="4" autocomplete="off" placeholder="1234">
+  <button id="auth-btn">Unlock</button>
+  <button id="disconnect-btn" class="secondary">Disconnect</button>
+</div>
+
+<!-- Main (tabs) -->
+<div id="main" class="hidden">
+  <div class="tabs">
+    <button id="tab-config" class="active">Nametag</button>
+    <button id="tab-contacts">Contacts</button>
+  </div>
+
+  <!-- Config tab -->
+  <div id="config-view">
+    <div class="panel">
+      <label for="f-name">Name</label>
+      <input id="f-name" type="text" placeholder="Your name">
+
+      <label for="f-groups">Groups (comma-separated)</label>
+      <input id="f-groups" type="text" placeholder="Alpha, Beta">
+
+      <div class="checkbox"><input id="f-sound" type="checkbox"><label for="f-sound" style="margin:0">Alert sound</label></div>
+
+      <label for="f-banner">Banner ms</label>
+      <input id="f-banner" type="number" value="5000">
+
+      <label for="f-rssi">RSSI floor (dBm, -120 = off)</label>
+      <input id="f-rssi" type="number" value="-120">
+
+      <h2>My contact info</h2>
+      <div class="muted">Any fields you like — Discord, website, phone, wallet…</div>
+      <div id="contact-rows"></div>
+      <button id="add-field-btn" class="secondary">+ field</button>
+
+      <div><button id="save-btn">Save to badge</button></div>
+    </div>
+  </div>
+
+  <!-- Contacts tab -->
+  <div id="contacts-view" class="hidden">
+    <div class="panel">
+      <button id="load-contacts-btn" class="secondary">Reload received contacts</button>
+      <button id="download-btn" class="secondary">Download JSON</button>
+      <div id="contacts-table"></div>
+    </div>
+  </div>
+</div>
+
+<div id="status" class="s-info">Ready.</div>
+
+<p class="muted" style="margin-top:24px">
+  Access is gated by the code shown on the badge (prove you can see it — like
+  Bluetooth pairing). The link never leaves your phone; everything happens over
+  a direct Bluetooth connection.
+</p>
+
+<script>
+"use strict";
+
+// --- GATT UUIDs (must match app/com.fri3dcamp.fri3dfriends/ble_setup.py) ---
+const SETUP_SVC   = "6e400020-b5a3-f393-e0a9-e50e24dcca9e";
+const AUTH_CHR    = "6e400021-b5a3-f393-e0a9-e50e24dcca9e";
+const INFO_CHR    = "6e400022-b5a3-f393-e0a9-e50e24dcca9e";
+const CFG_CHR     = "6e400023-b5a3-f393-e0a9-e50e24dcca9e";
+const STATUS_CHR  = "6e400024-b5a3-f393-e0a9-e50e24dcca9e";
+const CONTACTS_CHR= "6e400025-b5a3-f393-e0a9-e50e24dcca9e";
+const CTLOFF_CHR  = "6e400026-b5a3-f393-e0a9-e50e24dcca9e";
+
+const CONTACTS_HEADER_OFFSET = 0xFFFF;
+const CFG_CHUNK = 180;          // conservative payload/chunk (fits any negotiated MTU)
+
+const $ = (id) => document.getElementById(id);
+const enc = new TextEncoder();
+const dec = new TextDecoder();
+
+let device = null, server = null, chars = {}, contactsBytes = null;
+
+// --- badge id from ?badge= ---
+const params = new URLSearchParams(location.search);
+const badgeId = (params.get("badge") || "").toUpperCase().replace(/[^0-9A-F]/g, "").slice(0, 4);
+$("badge-label").textContent = badgeId ? ("Fri3d-" + badgeId) : "any";
+
+function setStatus(msg, kind) {
+  const el = $("status");
+  el.textContent = msg;
+  el.className = kind === "ok" ? "s-ok" : kind === "bad" ? "s-bad" : "s-info";
+}
+
+// --- browser capability / iOS Bluefy hint ---
+function checkSupport() {
+  if (navigator.bluetooth) return true;
+  $("connect-panel").classList.add("hidden");
+  $("unsupported").classList.remove("hidden");
+  const ua = navigator.userAgent || "";
+  const isIOS = /iPad|iPhone|iPod/.test(ua) ||
+                (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+  if (isIOS) {
+    $("ios-hint").classList.remove("hidden");
+    $("bluefy-open").href = "bluefy://open?url=" + encodeURIComponent(location.href);
+  } else {
+    $("desktop-hint").classList.remove("hidden");
+  }
+  return false;
+}
+
+// --- connect / auth ---
+async function connect() {
+  try {
+    setStatus("Opening Bluetooth chooser…", "info");
+    const filters = badgeId ? [{ name: "Fri3d-" + badgeId }] : [{ namePrefix: "Fri3d-" }];
+    device = await navigator.bluetooth.requestDevice({
+      filters, optionalServices: [SETUP_SVC],
+    });
+    device.addEventListener("gattdisconnected", onDisconnected);
+    setStatus("Connecting…", "info");
+    server = await device.gatt.connect();
+    const svc = await server.getPrimaryService(SETUP_SVC);
+    for (const [k, uuid] of Object.entries({
+      auth: AUTH_CHR, info: INFO_CHR, cfg: CFG_CHR,
+      status: STATUS_CHR, contacts: CONTACTS_CHR, ctloff: CTLOFF_CHR })) {
+      chars[k] = await svc.getCharacteristic(uuid);
+    }
+    // Subscribe to STATUS notifications (best-effort).
+    try {
+      await chars.status.startNotifications();
+      chars.status.addEventListener("characteristicvaluechanged", onStatusNotify);
+    } catch (e) { /* notify optional */ }
+    // Read pre-auth INFO to confirm we reached the right badge.
+    const info = JSON.parse(dec.decode(await chars.info.readValue()));
+    $("connect-panel").classList.add("hidden");
+    $("auth-panel").classList.remove("hidden");
+    $("code").focus();
+    setStatus("Connected to Fri3d-" + (info.badge || "?") + ". Enter the code shown on the badge.", "ok");
+  } catch (e) {
+    setStatus("Connection failed: " + (e.message || e), "bad");
+  }
+}
+
+function onDisconnected() {
+  setStatus("Badge disconnected.", "bad");
+  $("main").classList.add("hidden");
+  $("auth-panel").classList.add("hidden");
+  $("connect-panel").classList.remove("hidden");
+  chars = {};
+}
+
+function onStatusNotify(ev) {
+  const code = dec.decode(ev.target.value).replace(/\0+$/, "");
+  handleStatusCode(code);
+}
+
+function handleStatusCode(code) {
+  switch (code) {
+    case "ok": setStatus("Saved ✓ — the badge shows your nametag.", "ok"); break;
+    case "invalid": setStatus("Badge rejected the config (invalid).", "bad"); break;
+    case "too_large": setStatus("Config too large.", "bad"); break;
+    case "auth_required": setStatus("Not authorised — enter the code again.", "bad"); break;
+    case "auth_ok": setStatus("Unlocked ✓", "ok"); break;
+    case "auth_fail": setStatus("Wrong code, try again.", "bad"); break;
+    case "locked": setStatus("Too many wrong codes — badge locked briefly, new code shown.", "bad"); break;
+  }
+}
+
+async function auth() {
+  const code = ($("code").value || "").trim();
+  if (!/^\d{4}$/.test(code)) { setStatus("Enter the 4-digit code.", "bad"); return; }
+  try {
+    await chars.auth.writeValueWithResponse(enc.encode(code));
+    // Give the badge a moment, then read INFO — authed INFO carries the config.
+    await sleep(150);
+    const info = JSON.parse(dec.decode(await chars.info.readValue()));
+    if (!info.authed) { setStatus("Wrong code, try again.", "bad"); return; }
+    fillForm(info);
+    $("auth-panel").classList.add("hidden");
+    $("main").classList.remove("hidden");
+    setStatus("Unlocked ✓ — edit and Save.", "ok");
+  } catch (e) {
+    setStatus("Auth failed: " + (e.message || e), "bad");
+  }
+}
+
+// --- config form ---
+function fillForm(info) {
+  $("f-name").value = info.name || "";
+  $("f-groups").value = (info.groups || []).join(", ");
+  $("f-sound").checked = info.sound !== false;
+  $("f-banner").value = info.banner_ms != null ? info.banner_ms : 5000;
+  $("f-rssi").value = info.rssi_floor != null ? info.rssi_floor : -120;
+  const rows = $("contact-rows");
+  rows.innerHTML = "";
+  const contact = info.contact || {};
+  for (const [k, v] of Object.entries(contact)) addContactRow(k, v);
+  if (!Object.keys(contact).length) addContactRow("", "");
+}
+
+function addContactRow(k, v) {
+  const div = document.createElement("div");
+  div.className = "row";
+  const ik = document.createElement("input"); ik.type = "text"; ik.placeholder = "field"; ik.value = k || "";
+  const iv = document.createElement("input"); iv.type = "text"; iv.placeholder = "value"; iv.value = v || "";
+  const del = document.createElement("button"); del.textContent = "✕"; del.className = "secondary";
+  del.onclick = () => div.remove();
+  div.append(ik, iv, del);
+  $("contact-rows").appendChild(div);
+}
+
+function readForm() {
+  const contact = {};
+  for (const row of $("contact-rows").children) {
+    const [ik, iv] = row.querySelectorAll("input");
+    const k = ik.value.trim();
+    if (k) contact[k] = iv.value.trim();
+  }
+  const groups = $("f-groups").value.split(",").map(s => s.trim()).filter(Boolean);
+  return {
+    name: $("f-name").value.trim(),
+    groups,
+    sound: $("f-sound").checked,
+    banner_ms: parseInt($("f-banner").value, 10),
+    rssi_floor: parseInt($("f-rssi").value, 10),
+    contact,
+  };
+}
+
+async function save() {
+  try {
+    const payload = enc.encode(JSON.stringify(readForm()));
+    const total = Math.max(1, Math.ceil(payload.length / CFG_CHUNK));
+    if (total > 255) { setStatus("Config too large.", "bad"); return; }
+    setStatus("Saving…", "info");
+    for (let seq = 0; seq < total; seq++) {
+      const part = payload.slice(seq * CFG_CHUNK, (seq + 1) * CFG_CHUNK);
+      const frame = new Uint8Array(2 + part.length);
+      frame[0] = seq; frame[1] = total; frame.set(part, 2);
+      await chars.cfg.writeValueWithResponse(frame);
+    }
+    // The badge notifies STATUS; also poll it as a fallback for browsers that
+    // drop the notification.
+    await sleep(250);
+    try { handleStatusCode(dec.decode(await chars.status.readValue()).replace(/\0+$/, "")); } catch (e) {}
+  } catch (e) {
+    setStatus("Save failed: " + (e.message || e), "bad");
+  }
+}
+
+// --- contacts (paged read) ---
+function u16le(n) { return new Uint8Array([n & 0xFF, (n >> 8) & 0xFF]); }
+
+async function loadContacts() {
+  try {
+    setStatus("Reading contacts…", "info");
+    await chars.ctloff.writeValueWithResponse(u16le(CONTACTS_HEADER_OFFSET));
+    const hdr = JSON.parse(dec.decode(await chars.contacts.readValue()));
+    const total = hdr.len | 0, page = hdr.page || 400;
+    const buf = new Uint8Array(total);
+    let off = 0;
+    while (off < total) {
+      await chars.ctloff.writeValueWithResponse(u16le(off));
+      const slice = new Uint8Array(await chars.contacts.readValue().then(v => v.buffer));
+      if (!slice.length) break;
+      buf.set(slice.slice(0, Math.min(slice.length, total - off)), off);
+      off += slice.length;
+    }
+    contactsBytes = buf;
+    const list = JSON.parse(dec.decode(buf) || "[]");
+    renderContacts(list);
+    setStatus("Loaded " + list.length + " contact(s).", "ok");
+  } catch (e) {
+    setStatus("Contacts read failed: " + (e.message || e), "bad");
+  }
+}
+
+function renderContacts(list) {
+  if (!list.length) {
+    $("contacts-table").innerHTML = "<p class='muted'>No contacts received yet. Swap with another badge (press Y near a badge that also presses Y).</p>";
+    return;
+  }
+  let html = "<table><tr><th>Name</th><th>Received</th><th>Fields</th></tr>";
+  for (const c of list) {
+    const fields = c.fields || {};
+    const fs = Object.entries(fields).map(([k, v]) => esc(k) + ": " + esc(v)).join("<br>");
+    html += "<tr><td>" + esc(c.name || "?") + "</td><td>" + esc(c.received_at || "?") + "</td><td>" + fs + "</td></tr>";
+  }
+  html += "</table>";
+  $("contacts-table").innerHTML = html;
+}
+
+function esc(s) {
+  return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function downloadContacts() {
+  if (!contactsBytes) { setStatus("Load contacts first.", "bad"); return; }
+  const blob = new Blob([contactsBytes], { type: "application/json" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "contacts.json";
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+// --- wiring ---
+$("connect-btn").onclick = connect;
+$("auth-btn").onclick = auth;
+$("disconnect-btn").onclick = () => { if (device && device.gatt.connected) device.gatt.disconnect(); };
+$("save-btn").onclick = save;
+$("add-field-btn").onclick = () => addContactRow("", "");
+$("load-contacts-btn").onclick = loadContacts;
+$("download-btn").onclick = downloadContacts;
+$("code").addEventListener("keydown", (e) => { if (e.key === "Enter") auth(); });
+$("tab-config").onclick = () => {
+  $("tab-config").classList.add("active"); $("tab-contacts").classList.remove("active");
+  $("config-view").classList.remove("hidden"); $("contacts-view").classList.add("hidden");
+};
+$("tab-contacts").onclick = () => {
+  $("tab-contacts").classList.add("active"); $("tab-config").classList.remove("active");
+  $("contacts-view").classList.remove("hidden"); $("config-view").classList.add("hidden");
+  if (!contactsBytes) loadContacts();
+};
+
+checkSupport();
+</script>
+</body>
+</html>

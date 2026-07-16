@@ -16,9 +16,11 @@ things:
    (Email, Phone, Website, Discord, bitcoin wallet…). What you receive is stored
    on the badge with the date/time — **one entry per swap**.
 
-A **PIN-protected WiFi web portal** (served by the badge while it's on WiFi) lets
-you edit your name / groups / contact fields and view/export received contacts
-from a phone or laptop — the badge keyboard is too cumbersome for lots of text.
+A **phone setup page over Bluetooth** (Web Bluetooth) lets you edit your name /
+groups / contact fields and view/export received contacts from a phone or laptop
+— the badge keyboard is too cumbersome for lots of text. It needs **no WiFi or
+network**: the phone talks Bluetooth straight to the badge. Scan the QR the badge
+shows to open the page; a 4-digit code on the badge gates access.
 
 It's **generic and redistributable**: any hackerspace/makerspace can flash it and
 set their own group name(s) and member name by editing one file (no code changes)
@@ -86,29 +88,43 @@ Edit **`/apps/com.fri3dcamp.fri3dfriends/config.json`**:
   (otherwise auto-detected). Only needed if autodetection fails.
 - **`contact`** — your "my contact info": a free-form object of `"field":
   "value"` pairs (Discord, website, phone, bitcoin wallet, anything). This is the
-  data sent to another badge when you both press **Y**. Easiest to edit in the
-  **WiFi portal** (below) rather than by hand.
+  data sent to another badge when you both press **Y**. Easiest to edit from the
+  **phone setup page** (below) rather than by hand.
 
-## Setup / contacts over WiFi (no keyboard needed)
+## Setup / contacts from your phone (over Bluetooth, no keyboard, no WiFi)
 
-While the badge is connected to WiFi, it serves a small **web portal** so you can
-edit everything above (name, groups, and the free-form `contact` fields) and
-view/export the contacts you've received — from a phone or laptop browser.
+The badge runs a small **Web-Bluetooth setup service** so you can edit everything
+above (name, groups, and the free-form `contact` fields) and view/export the
+contacts you've received — from a **phone or laptop browser**, over Bluetooth.
+No network is involved: the page talks GATT straight to the badge, which is ideal
+at Fri3d Camp where badges and phones sit on different SSIDs/subnets.
 
-- The badge shows its address at the bottom of the nametag: `⚙ http://<ip>:8080`
-  (or `⚙ WiFi not connected`). On the first-run **"Configure me" screen** the
-  badge also shows a **QR code** of that URL — scan it with your phone instead
-  of typing the IP.
-- Browsing there asks for a **PIN**. The badge shows the PIN on its screen as a
-  login challenge (`portal PIN: 12345`). Type it in once; a session cookie keeps
-  you in. Wrong guesses lock out briefly and rotate the PIN. The PIN gates
-  *access* only (it's plain HTTP on the local network) — enough for a badge.
-- Pages: **/** (edit config + add/remove contact fields), **/contacts** (received
-  contacts with date/time), **/contacts.json** (download/export).
+- **Open the page.** Scan the **QR code** the badge shows (on the first-run
+  "Configure me" screen, or in the setup window on a configured badge). It points
+  at a static page on GitHub Pages:
+  `https://steemandavid.github.io/fri3d-friends/setup/?badge=XXXX`. `XXXX` is the
+  badge's unique id, also printed on screen (`Fri3d-XXXX`).
+- **Connect.** Tap **Connect** and pick the badge from the Bluetooth chooser. The
+  `?badge=XXXX` filter means the chooser shows exactly **your** badge.
+- **Unlock.** The badge shows a **4-digit code**. Type it in (prove you can see
+  the screen — the Bluetooth-pairing trust model). Five wrong tries lock the badge
+  out briefly and rotate the code.
+- **Edit & save.** Change your name / groups / runtime settings and add/remove
+  free-form contact fields, then **Save** — the badge applies name + contact +
+  runtime settings live (group changes need an app restart, as before). Switch to
+  the **Contacts** tab to view received contacts and **download** them as JSON.
+- **Opening setup on a configured badge:** **hold B for ~1.5 s** (a short B press
+  still toggles mute). This opens a **2-minute** setup window (QR + code + a
+  countdown); press **A/Y** to close it early. Proximity pauses during the window
+  and resumes when it closes.
+- **Browsers:** works in **Chrome/Edge** (Android + desktop). **iPhone/iPad**:
+  Safari has no Web Bluetooth — the page detects this and points you at the free
+  **Bluefy** browser (the same page works there unchanged).
 - **International names work:** accented and non-ASCII names/groups (José, Noël,
-  L'Atelier, …) are handled correctly — type them straight into the form. Edits are
-  written **atomically**, so a battery dying mid-save won't corrupt your config or
-  wipe your received contacts.
+  L'Atelier, …) are handled correctly. Edits are written **atomically**, so a
+  battery dying mid-save won't corrupt your config or wipe your received contacts.
+- There is also a headless CLI client, `tools/setup_client.py` (needs
+  `pip install bleak`), that speaks the same protocol for testing/scripting.
 
 ## Swapping contacts (Y button)
 
@@ -116,8 +132,8 @@ Press **Y** and, within ~5 s, have a nearby badge's owner press **Y** too. The
 two badges find each other over Bluetooth and swap their `contact` info in both
 directions — **no shared group or friendship required**, just radio range. The
 banner confirms `Swapped with <name> ✓`; the received fields are stored on your
-badge with the date & time and are visible in the WiFi portal. (If nobody else is
-swapping in the window you get `No one swapping nearby`.)
+badge with the date & time and are visible in the phone setup page's **Contacts**
+tab. (If nobody else is swapping in the window you get `No one swapping nearby`.)
 
 > Note: the screen shows your group(s) as **coloured pills** (colour derived from
 > the group name). The **!Fri3d Friends logo** (`fri3dfriends.png`) appears on the
@@ -125,17 +141,19 @@ swapping in the window you get `No one swapping nearby`.)
 > (auto-detected; force with the `board` key above).
 
 > **First-run / unconfigured:** if `name` is empty or `groups` is empty, the
-> badge shows a **"Configure me" screen with a QR code** of its setup-portal URL
-> and **does not advertise or scan** — safer than beeping as a blank badge. Scan
-> the QR (or type the URL), fill in your name and group(s), and save: the badge
-> **switches to the nametag and goes on the air immediately** — no reboot needed.
+> badge shows a **"Configure me" screen with a QR code** of its Bluetooth setup
+> page and **does not run the proximity beacon/scan** — safer than beeping as a
+> blank badge. It *does* advertise as `Fri3d-XXXX` so a phone can connect and
+> configure it. Scan the QR, connect, enter the on-screen code, fill in your name
+> and group(s), and save: the badge **switches to the nametag and goes on the air
+> immediately** — no reboot needed.
 
 ## Controls
 
 | Button | Action |
 |---|---|
 | **A** | Open the friends-nearby panel (cards: name · shared group · signal bars · dBm · age) |
-| **B** | Mute / unmute the alert buzzer (saved to config, survives reboot) |
+| **B** | Short press: mute / unmute the alert buzzer (saved). **Hold ~1.5 s:** open the phone-setup window (Bluetooth) |
 | **Y** | Swap contacts with another badge nearby (they press **Y** too, within ~5 s) |
 | **X** | *(handled by the OS)* quit to the launcher / OS menu |
 | **START** | *(unused)* |
@@ -196,11 +214,12 @@ until you open the app — but *they* see *you*.
 app/com.fri3dcamp.fri3dfriends/   → the app (deploy to /apps/…)
   MANIFEST.JSON, fri3d_friends.py, ble_proximity.py (proximity beacon),
   beacon_service.py (background beacon boot service),
-  contact_exchange.py (Y-button GATT swap), web_portal.py (PIN-gated setup portal),
+  contact_exchange.py (Y-button GATT swap), ble_setup.py (Web-Bluetooth setup GATT service),
   config.json, fri3dfriends.png (splash logo), icon_64x64.png (launcher icon),
   montserrat_name.ttf (42px name font)
-tests/        off-device pytest: BLE wire format + contact exchange + portal forms
-tools/        host_advertise.py, pull_file.py, make_logos.py + make_hybrid_logo.py (logo gen)
+docs/setup/index.html   → the Web-Bluetooth setup page (served via GitHub Pages)
+tests/        off-device pytest: BLE wire format + contact exchange + setup protocol
+tools/        setup_client.py (bleak GATT client), host_advertise.py, pull_file.py, make_logos.py
 DESIGN.md     protocol spec, verified hardware facts, verification status, open items
 PLAN.md       the original full design document
 ```
@@ -234,12 +253,20 @@ a subset Montserrat TTF (`montserrat_name.ttf`).
 
 ## Tests
 
-Off-device unit tests (pure wire-format / storage / portal-form logic, no badge
-needed):
+Off-device unit tests (pure wire-format / storage / setup-protocol logic, no
+badge needed):
 
 ```bash
 pytest tests/
 ```
+
+Against a real badge in setup mode, the full GATT protocol can be exercised
+headlessly with `python3 tools/setup_client.py` (needs `pip install bleak`) —
+see its `--help`.
+
+The Web-Bluetooth page (`docs/setup/`) is published via **GitHub Pages** (repo
+**Settings → Pages → Deploy from branch → `main` / `/docs`**); its URL is what the
+badge's QR encodes.
 
 ## License
 

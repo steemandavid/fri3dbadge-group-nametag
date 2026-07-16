@@ -36,9 +36,17 @@ from ble_proximity import (
     EVICT_MS, RSSI_FLOOR_DEFAULT,
 )
 from contact_exchange import ContactExchange, add_received
-from web_portal import WebPortal
+from ble_setup import SetupService, setup_name, SETUP_WINDOW_MS
 
 FULLNAME = "com.fri3dcamp.fri3dfriends"
+
+# Static Web-Bluetooth setup page (GitHub Pages). The badge shows a QR of this
+# URL + its own id so a phone lands on the right badge in the chooser.
+SETUP_URL_BASE = "https://steemandavid.github.io/fri3d-friends/setup/"
+
+# A configured badge opens a setup window with a LONG press of B (short press
+# still toggles mute). START is intentionally unused / not present on both boards.
+SETUP_HOLD_MS = 1500
 
 
 def _read_version():
@@ -235,10 +243,26 @@ class Fri3dFriends(Activity):
         self._exch = ContactExchange()
         self._exchanging = False
         self._exch_task = None
-        self._portal = None
-        self._portal_lbl = None
-        self._portal_last = None
-        self._portal_next_ms = 0
+        # BLE phone-setup (Web Bluetooth). The setup GATT service is registered
+        # together with the exchange service (single gatts_register_services call).
+        self._setup = SetupService(APP_DIR, self._exch, on_saved=self._reload_config)
+        self._exch.attach_setup(self._setup)
+        self._setup_task = None
+        self._setup_open = False          # True while a configured-badge window runs
+        self._b_down_ms = None            # B-button press timestamp (long-press detect)
+        self._b_long = False              # this B press already opened a setup window
+        self._setup_info_lbl = None       # Configure-me: "Fri3d-XXXX  code NNNN"
+        self._setup_hint_lbl = None       # nametag footer: "hold B: phone setup"
+        self._setup_last = None
+        self._setup_next_ms = 0
+        self._setup_win_deadline = 0
+        self._pending_begin = False       # begin proximity once setup session ends
+        self._overlay = None              # configured-badge window overlay (create-once)
+        self._overlay_qr = None
+        self._overlay_qr_box = None
+        self._overlay_code_lbl = None
+        self._overlay_count_lbl = None
+        self._overlay_qr_last = None
         self._qr = None
         self._qr_box = None
         self._qr_last = None
@@ -664,27 +688,41 @@ class Fri3dFriends(Activity):
             self._build_nametag(scr)
         self._clock_lbl = self._label(scr, CLOCK_X, CLOCK_Y, "--:--", COL_BATT,
                                       font=lv.font_montserrat_14)
-        self._portal_lbl = self._label(scr, 0, CONTROLS_TOP - 14, "", COL_BATT,
-                                       font=lv.font_montserrat_12, center=True)
+        # Footer hint (was the WiFi-portal URL): configured badges get a phone
+        # setup reachable by holding B. Blank on the Configure-me screen (it
+        # already explains itself).
+        hint = "" if self._unconfigured else "hold B: phone setup"
+        self._setup_hint_lbl = self._label(scr, 0, CONTROLS_TOP - 14, hint, COL_BATT,
+                                           font=lv.font_montserrat_12, center=True)
         self._controls_lbl = self._label(scr, 0, CONTROLS_TOP, self._controls_text(),
                                          COL_NONE, font=lv.font_montserrat_12, center=True)
+        if not self._unconfigured:
+            self._build_setup_overlay(scr)
         self._build_banner(scr)
 
     def _build_setup(self, scr):
         # First-run "Configure me" layout. Every widget is tracked in
-        # _setup_widgets so a portal save can HIDE (never delete — deleting
+        # _setup_widgets so a save (over BLE) can HIDE (never delete — deleting
         # live widgets/screens crashes this build) the lot and swap to the
-        # nametag in place.
+        # nametag in place. No WiFi needed: a phone connects over Bluetooth to
+        # the static Web-Bluetooth page (SETUP_URL_BASE); the QR carries the URL
+        # incl. ?badge=XXXX so the browser chooser shows exactly this badge.
+        info = self._label(scr, 0, 210, "starting Bluetooth…", COL_NEAR,
+                           font=lv.font_montserrat_16, center=True)
+        self._setup_info_lbl = info
         self._setup_widgets = [
             self._label(scr, 0, 6, "Configure me", COL_HINT, font=lv.font_montserrat_24, center=True),
-            self._label(scr, 0, 38, "open this app's setup portal", COL_NONE, font=lv.font_montserrat_16, center=True),
+            self._label(scr, 0, 34, "scan with your phone (Bluetooth)", COL_NONE,
+                        font=lv.font_montserrat_14, center=True),
+            info,
         ]
-        # QR code of the portal URL, on a white tile (the margin doubles as
-        # the QR quiet zone). Hidden until WiFi is up; fed by _refresh_portal.
+        # QR of the setup-page URL, on a white tile (the margin doubles as the
+        # QR quiet zone). Hidden until the badge id is known (radio up); fed by
+        # _refresh_setup. More vertical room now the portal footer line is gone.
         try:
-            box = self._rbox(scr, (W - 136) // 2, 60, 136, 136, 0xFFFFFF, radius=6)
+            box = self._rbox(scr, (W - 150) // 2, 54, 150, 150, 0xFFFFFF, radius=6)
             qr = lv.qrcode(box)
-            qr.set_size(108)
+            qr.set_size(124)
             qr.set_dark_color(_col(0x000000))
             qr.set_light_color(_col(0xFFFFFF))
             qr.center()
@@ -692,9 +730,42 @@ class Fri3dFriends(Activity):
             self._qr = qr
             self._qr_box = box
             self._setup_widgets.append(box)
-        except Exception:      # no lv.qrcode in this build: text URL still shows
+        except Exception:      # no lv.qrcode in this build: text line still shows
             self._qr = None
             self._qr_box = None
+
+    def _build_setup_overlay(self, scr):
+        # Configured-badge setup window overlay: a full-screen panel with the
+        # setup QR + on-screen code + countdown. Built ONCE and hidden; shown
+        # while a window is open and hidden again on close (never deleted —
+        # landmine #1). Sits below the banner (built after this).
+        ov = self._rbox(scr, 0, 0, W, H, COL_BG, radius=0)
+        try:
+            ov.set_style_border_width(2, 0)
+            ov.set_style_border_color(_col(COL_HINT), 0)
+        except Exception:
+            pass
+        self._label(ov, 0, 6, "Phone setup", COL_HINT, font=lv.font_montserrat_24, center=True)
+        self._label(ov, 0, 34, "scan with your phone (Bluetooth)", COL_NONE,
+                    font=lv.font_montserrat_14, center=True)
+        try:
+            box = self._rbox(ov, (W - 140) // 2, 54, 140, 140, 0xFFFFFF, radius=6)
+            qr = lv.qrcode(box)
+            qr.set_size(116)
+            qr.set_dark_color(_col(0x000000))
+            qr.set_light_color(_col(0xFFFFFF))
+            qr.center()
+            self._overlay_qr = qr
+            self._overlay_qr_box = box
+        except Exception:
+            self._overlay_qr = None
+            self._overlay_qr_box = None
+        self._overlay_code_lbl = self._label(ov, 0, 200, "", COL_NEAR,
+                                             font=lv.font_montserrat_16, center=True)
+        self._overlay_count_lbl = self._label(ov, 0, 222, "", COL_NONE,
+                                              font=lv.font_montserrat_12, center=True)
+        ov.add_flag(lv.obj.FLAG.HIDDEN)
+        self._overlay = ov
 
     def _build_nametag(self, scr):
         cfg = self._config
@@ -886,7 +957,10 @@ class Fri3dFriends(Activity):
                                 self._config["rssi_floor"])
             except Exception:
                 pass
-        self._start_portal()
+        else:
+            # Unconfigured badge, app foreground: run the BLE setup service so a
+            # phone can configure us over Bluetooth (no proximity radio runs).
+            self._start_configure_setup()
         if not self._entered and self._splash_task is None:
             self._splash_task = TaskManager.create_task(self._splash_then_enter())
         self._task = TaskManager.create_task(self._loop())
@@ -894,7 +968,7 @@ class Fri3dFriends(Activity):
     def onPause(self, screen):
         super().onPause(screen)
         self._stop_task()
-        self._stop_portal()
+        self._stop_setup()
         self._teardown_ble()
         self._set_brightness(255)
         self._led_last = None
@@ -906,7 +980,7 @@ class Fri3dFriends(Activity):
 
     def onStop(self, screen):
         self._stop_task()
-        self._stop_portal()
+        self._stop_setup()
         self._teardown_ble()
         try:
             lights.clear()
@@ -916,7 +990,7 @@ class Fri3dFriends(Activity):
 
     def onDestroy(self, screen):
         self._stop_task()
-        self._stop_portal()
+        self._stop_setup()
         self._teardown_ble()
         try:
             if self._buzzer:
@@ -971,16 +1045,40 @@ class Fri3dFriends(Activity):
                 if self._exchanging:
                     await asyncio.sleep_ms(TICK_MS)
                     continue
+                if self._setup_open:
+                    # A configured-badge setup window owns the radio for its
+                    # ~2 min: keep the loop out of it (no LED writes / scan that
+                    # would starve the GATT link) but keep the overlay live.
+                    self._refresh_setup(now)
+                    self._refresh_clock(now)
+                    if self._banner_until and time.ticks_diff(now, self._banner_until) >= 0:
+                        self._hide_banner()
+                    await asyncio.sleep_ms(TICK_MS)
+                    continue
                 if self._reload_pending:
                     self._reload_pending = False
                     self._apply_reload()
+                # First-run handoff: proximity begins only once the setup session
+                # that just saved has fully torn down (so they never advertise at
+                # the same time). See _apply_reload's was_unconfigured branch.
+                if self._pending_begin and self._setup_task is None:
+                    self._pending_begin = False
+                    try:
+                        self._ble.begin(self._config["groups"], self._config["name"],
+                                        self._config["rssi_floor"])
+                    except Exception:
+                        pass
                 self._ble.tick(now, dt)
                 self._drain_arrivals()
                 self._refresh_nearby()
-                self._update_leds(now)
+                # While a setup session runs (Configure-me on an unconfigured
+                # badge), skip LED writes — the WS2812 write disables IRQs and
+                # would starve a phone's GATT connection (field bug 2 / plan §2.3).
+                if self._setup_task is None:
+                    self._update_leds(now)
                 self._refresh_battery(now)
                 self._refresh_clock(now)
-                self._refresh_portal(now)
+                self._refresh_setup(now)
                 self._resync_time(now)
                 if self._banner_until and time.ticks_diff(now, self._banner_until) >= 0:
                     self._hide_banner()
@@ -996,14 +1094,23 @@ class Fri3dFriends(Activity):
             await asyncio.sleep_ms(TICK_MS)
 
     def _handle_buttons(self):
-        for name in ("a", "b", "y"):
+        # B is press-and-hold aware: a SHORT press toggles mute (on release), a
+        # LONG press (>= SETUP_HOLD_MS) opens the phone-setup window on a
+        # configured badge. A and Y stay simple edge triggers. All actions are
+        # suppressed during a swap or an open setup window (a WS2812 LED write or
+        # an lvgl toggle would starve the short GATT link — field bug 2).
+        busy = self._exchanging or self._setup_open or self._setup_task is not None
+        self._handle_b_button(busy)
+        for name in ("a", "y"):
             ev = self._edge(name)
             if not ev:
                 continue
-            # During a swap, keep updating edge state (above) but run NO action:
-            # B's flash/save writes and A's lvgl toggles otherwise starve the
-            # short GATT link (the WS2812 write disables IRQs — field bug 2).
-            if self._exchanging:
+            if self._setup_open:
+                # Any A/Y press closes the setup window early.
+                self._wake()
+                self._stop_setup()
+                return
+            if busy:
                 continue
             self._wake()
             if ev == "y":
@@ -1012,15 +1119,6 @@ class Fri3dFriends(Activity):
                 # deactivates. Match the README: unconfigured badges don't swap.
                 if not self._unconfigured:
                     self._exch_task = TaskManager.create_task(self._do_exchange())
-            elif ev == "b":
-                self._sound = not self._sound
-                self._save_config("sound", self._sound)
-                self._flash_leds(*_hsv(0 if not self._sound else 120))
-                if self._controls_lbl is not None:
-                    try:
-                        self._controls_lbl.set_text(self._controls_text())
-                    except Exception:
-                        pass
             elif ev == "a":
                 self._detail = not self._detail
                 if self._detail_panel is not None:
@@ -1031,6 +1129,37 @@ class Fri3dFriends(Activity):
                             self._detail_panel.add_flag(lv.obj.FLAG.HIDDEN)
                     except Exception:
                         pass
+
+    def _handle_b_button(self, busy):
+        held = self._held("b")
+        prev_down = self._b_down_ms is not None
+        now = time.ticks_ms()
+        if held and not prev_down:
+            self._b_down_ms = now                 # press started
+            self._b_long = False
+        elif held and prev_down:
+            # Long-press threshold: open the setup window once, mid-hold.
+            if (not self._b_long and not busy and not self._unconfigured and
+                    time.ticks_diff(now, self._b_down_ms) >= SETUP_HOLD_MS):
+                self._b_long = True
+                self._wake()
+                self._open_setup_window()
+        elif not held and prev_down:
+            was_long = self._b_long
+            self._b_down_ms = None
+            self._b_long = False
+            if busy or was_long:
+                return                            # long-press already acted
+            # Short press -> toggle mute.
+            self._wake()
+            self._sound = not self._sound
+            self._save_config("sound", self._sound)
+            self._flash_leds(*_hsv(0 if not self._sound else 120))
+            if self._controls_lbl is not None:
+                try:
+                    self._controls_lbl.set_text(self._controls_text())
+                except Exception:
+                    pass
 
     def _drain_arrivals(self):
         if self._unconfigured:
@@ -1241,83 +1370,177 @@ class Fri3dFriends(Activity):
         except Exception:
             pass
 
-    # ------------------------------------------------------------------ web portal
-    def _portal_ip(self):
-        try:
-            from mpos import WifiService
-            if not WifiService.is_connected():
-                return None
-            return WifiService.get_ipv4_address()
-        except Exception:
-            return None
+    # ------------------------------------------------------------------ BLE phone setup
+    def _setup_url(self, bid):
+        return SETUP_URL_BASE + "?badge=" + bid
 
-    def _start_portal(self):
-        if self._portal is not None:
+    def _start_configure_setup(self):
+        # Unconfigured badge, app foreground: run the setup GATT service so a
+        # phone can configure us over Bluetooth (no proximity radio is running,
+        # so the setup service owns the radio for the whole Configure-me screen).
+        if self._setup_task is not None:
             return
         try:
-            self._portal = WebPortal(APP_DIR, on_change=self._reload_config,
-                                     ip_getter=self._portal_ip)
-            self._portal.start()
+            self._setup_task = TaskManager.create_task(self._run_configure_setup())
         except Exception:
-            self._portal = None
+            self._setup_task = None
 
-    def _stop_portal(self):
-        if self._portal is not None:
+    async def _run_configure_setup(self):
+        me = asyncio.current_task()
+        try:
+            # No proximity to suspend, no timeout: runs until cancelled (screen
+            # change / save) — request_stop() ends it after a successful save.
+            await self._setup.run("configure", proximity=None, timeout_ms=None)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            pass
+        finally:
+            # Only clear the handle if it still points at THIS task: the splash->
+            # main setContentView re-fires onPause/onResume, which cancels this
+            # session and starts a fresh one — a blind `= None` here would clobber
+            # the new session's live handle (breaking teardown-on-pause + gates).
+            if self._setup_task is me:
+                self._setup_task = None
+
+    def _open_setup_window(self):
+        # Configured badge: open a bounded (SETUP_WINDOW_MS) setup window. The
+        # session suspends the proximity radio and resumes it on close.
+        if (self._unconfigured or self._exchanging or self._setup_open or
+                self._setup_task is not None):
+            return
+        self._setup_open = True
+        self._setup_win_deadline = time.ticks_add(time.ticks_ms(), SETUP_WINDOW_MS)
+        self._show_setup_overlay()
+        try:
+            self._setup_task = TaskManager.create_task(self._run_setup_window())
+        except Exception:
+            self._setup_task = None
+            self._setup_open = False
+            self._hide_setup_overlay()
+
+    async def _run_setup_window(self):
+        me = asyncio.current_task()
+        try:
+            await self._setup.run("window", proximity=self._ble,
+                                  timeout_ms=SETUP_WINDOW_MS)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            pass
+        finally:
+            self._setup_open = False
+            if self._setup_task is me:   # don't clobber a restarted session (see above)
+                self._setup_task = None
+            self._hide_setup_overlay()
+            self._led_last = None
             try:
-                self._portal.stop()
+                self._show_banner("Setup closed")
             except Exception:
                 pass
-            self._portal = None
 
-    def _refresh_portal(self, now):
-        if self._portal_lbl is None or time.ticks_diff(now, self._portal_next_ms) < 0:
+    def _stop_setup(self):
+        # Cancel any running setup session (configure or window) and clear
+        # overlay/window state. Mirrors _stop_task's cancel-then-teardown; the
+        # session's run() re-raises the cancel and tears the radio down itself.
+        if self._setup_task is not None:
+            try:
+                self._setup.request_stop()
+            except Exception:
+                pass
+            try:
+                self._setup_task.cancel()
+            except Exception:
+                pass
+            self._setup_task = None
+        self._setup_open = False
+        self._hide_setup_overlay()
+
+    def _show_setup_overlay(self):
+        if self._overlay is not None:
+            try:
+                self._overlay.remove_flag(lv.obj.FLAG.HIDDEN)
+                self._overlay.move_foreground()
+            except Exception:
+                pass
+        self._setup_last = None
+        self._overlay_qr_last = None
+
+    def _hide_setup_overlay(self):
+        if self._overlay is not None:
+            try:
+                self._overlay.add_flag(lv.obj.FLAG.HIDDEN)
+            except Exception:
+                pass
+
+    def _refresh_setup(self, now):
+        # Throttled: read the live badge id / code / (window) countdown from the
+        # setup session and update the QR + on-screen text. Runs both on the
+        # Configure-me screen (unconfigured) and in the window overlay.
+        if time.ticks_diff(now, self._setup_next_ms) < 0:
             return
-        # The URL path hits the OS/WiFi stack (get_ipv4_address); throttle to ~2 s
-        # like the other refreshers rather than querying every 30 ms frame.
-        self._portal_next_ms = time.ticks_add(now, 2000)
-        pin = None
+        self._setup_next_ms = time.ticks_add(now, 1000)
+        if self._setup_task is None:
+            return
         try:
-            pin = self._portal.pending_pin() if self._portal else None
+            bid = self._setup.current_badge_id()
+            code = self._setup.current_code()
         except Exception:
-            pin = None
-        if pin:
-            txt = "portal PIN: %s" % pin
-            col = COL_NEAR
+            return
+        url = self._setup_url(bid) if bid and bid != "0000" else None
+        if self._setup_open:
+            # Configured-badge window overlay.
+            self._update_setup_qr(self._overlay_qr, self._overlay_qr_box, url)
+            self._set_lbl(self._overlay_code_lbl,
+                          ("%s   code %s" % (setup_name(bid), code)) if code else setup_name(bid))
+            secs = time.ticks_diff(self._setup_win_deadline, now) // 1000
+            if secs < 0:
+                secs = 0
+            self._set_lbl(self._overlay_count_lbl, "closes in %ds · Y to close" % secs)
         else:
-            url = None
-            try:
-                url = self._portal.url() if self._portal else None
-            except Exception:
-                url = None
-            txt = ("⚙ " + url) if url else "⚙ WiFi not connected"
-            col = COL_BATT
-            self._update_qr(url)
-        if txt != self._portal_last:
-            try:
-                self._portal_lbl.set_text(txt)
-                self._portal_lbl.set_style_text_color(_col(col), 0)
-            except Exception:
-                pass
-            self._portal_last = txt
+            # Configure-me screen (unconfigured).
+            self._update_setup_qr(self._qr, self._qr_box, url)
+            if bid and bid != "0000":
+                txt = "%s   code %s" % (setup_name(bid), code) if code else setup_name(bid)
+            else:
+                txt = "starting Bluetooth…"
+            if txt != self._setup_last:
+                self._set_lbl(self._setup_info_lbl, txt)
+                self._setup_last = txt
 
-    def _update_qr(self, url):
-        # Show/refresh the setup-portal QR on the unconfigured screen (the only
-        # screen that builds self._qr). Hidden while there's no URL (no WiFi).
-        if self._qr is None or self._qr_box is None or url == self._qr_last:
+    def _update_setup_qr(self, qr, box, url):
+        if qr is None or box is None:
+            return
+        is_configure = qr is self._qr
+        last = self._qr_last if is_configure else self._overlay_qr_last
+        if url == last:
             return
         try:
             if url:
-                self._qr.update(url, len(url))
-                self._qr_box.remove_flag(lv.obj.FLAG.HIDDEN)
+                qr.update(url, len(url))
+                box.remove_flag(lv.obj.FLAG.HIDDEN)
             else:
-                self._qr_box.add_flag(lv.obj.FLAG.HIDDEN)
+                box.add_flag(lv.obj.FLAG.HIDDEN)
+        except Exception:
+            return
+        if is_configure:
             self._qr_last = url
+        else:
+            self._overlay_qr_last = url
+
+    @staticmethod
+    def _set_lbl(lbl, text):
+        if lbl is None:
+            return
+        try:
+            lbl.set_text(text)
         except Exception:
             pass
 
     def _reload_config(self):
-        # Called from the portal (same asyncio loop). Defer the actual apply to
-        # the main loop so it never races the BLE tick / exchange window.
+        # Called from the setup service (same asyncio loop) after a save. Defer
+        # the actual apply to the main loop so it never races the BLE tick /
+        # exchange window / setup session.
         self._reload_pending = True
 
     def _apply_reload(self):
@@ -1353,16 +1576,15 @@ class Fri3dFriends(Activity):
             except Exception:
                 pass
         if was_unconfigured and not self._unconfigured:
-            # First-time setup just completed via the portal. Starting BLE is
-            # safe here (no screen involved) and is needed now, not just
-            # cosmetically: the Y-button gate (F-5) reads self._unconfigured
-            # live, so it would open immediately — without begin() here, Y
-            # would pass the gate but find no radio running.
-            try:
-                self._ble.begin(self._config["groups"], self._config["name"],
-                                self._config["rssi_floor"])
-            except Exception:
-                pass
+            # First-time setup just completed over BLE. Hand the radio from the
+            # setup session to the proximity feature WITHOUT the two advertising
+            # at once: the setup session is still advertising Fri3d-XXXX during
+            # its save-grace (so the phone can read back the saved config), so we
+            # DON'T begin proximity here. Instead flag it — the main loop starts
+            # proximity once the setup session has fully ended (_setup_task None).
+            # The Y-swap gate stays closed while _setup_task is not None
+            # (see _handle_buttons), so Y can't find a half-up radio in between.
+            self._pending_begin = True
             self._swap_setup_for_nametag()
         self._show_banner("Config saved ✓")
 
@@ -1385,6 +1607,18 @@ class Fri3dFriends(Activity):
             self._build_nametag(self._scr)
         except Exception:
             pass
+        # This badge started unconfigured, so the nametag footer hint and the
+        # setup-window overlay were never built — build them now (create-once).
+        if self._setup_hint_lbl is not None:
+            try:
+                self._setup_hint_lbl.set_text("hold B: phone setup")
+            except Exception:
+                pass
+        if self._overlay is None:
+            try:
+                self._build_setup_overlay(self._scr)
+            except Exception:
+                pass
         # New widgets were created after the banner, so re-raise it above them.
         if self._banner_bg is not None:
             try:
