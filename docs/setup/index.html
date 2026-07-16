@@ -99,11 +99,12 @@
   <!-- Config tab -->
   <div id="config-view">
     <div class="panel">
-      <label for="f-name">Name</label>
+      <label for="f-name">Name <span style="color:var(--hint)">*required</span></label>
       <input id="f-name" type="text" placeholder="Your name">
 
-      <label for="f-groups">Groups (comma-separated)</label>
+      <label for="f-groups">Groups (comma-separated) <span style="color:var(--hint)">*at least one required</span></label>
       <input id="f-groups" type="text" placeholder="Alpha, Beta">
+      <div class="muted">The badge stays in setup until it has a name <b>and</b> at least one group — groups are what light up when a friend is near.</div>
 
       <div class="checkbox"><input id="f-sound" type="checkbox"><label for="f-sound" style="margin:0">Alert sound</label></div>
 
@@ -310,7 +311,16 @@ function readForm() {
 
 async function save() {
   try {
-    const payload = enc.encode(JSON.stringify(readForm()));
+    const form = readForm();
+    // A badge needs a name AND at least one group to leave setup mode (groups
+    // drive the proximity matching) — otherwise it silently stays on the QR
+    // screen. Validate here so that can't happen without an explanation.
+    if (!form.name) { setStatus("Enter a name before saving.", "bad"); $("f-name").focus(); return; }
+    if (!form.groups.length) {
+      setStatus("Add at least one group (comma-separated) — the badge stays in setup until it has a name and a group.", "bad");
+      $("f-groups").focus(); return;
+    }
+    const payload = enc.encode(JSON.stringify(form));
     const total = Math.max(1, Math.ceil(payload.length / CFG_CHUNK));
     if (total > 255) { setStatus("Config too large.", "bad"); return; }
     setStatus("Saving…", "info");
