@@ -96,7 +96,9 @@ edit everything above (name, groups, and the free-form `contact` fields) and
 view/export the contacts you've received — from a phone or laptop browser.
 
 - The badge shows its address at the bottom of the nametag: `⚙ http://<ip>:8080`
-  (or `⚙ WiFi not connected`).
+  (or `⚙ WiFi not connected`). On the first-run **"Configure me" screen** the
+  badge also shows a **QR code** of that URL — scan it with your phone instead
+  of typing the IP.
 - Browsing there asks for a **PIN**. The badge shows the PIN on its screen as a
   login challenge (`portal PIN: 12345`). Type it in once; a session cookie keeps
   you in. Wrong guesses lock out briefly and rotate the PIN. The PIN gates
@@ -123,8 +125,10 @@ swapping in the window you get `No one swapping nearby`.)
 > (auto-detected; force with the `board` key above).
 
 > **First-run / unconfigured:** if `name` is empty or `groups` is empty, the
-> badge shows a "Configure me" hint and **does not advertise or scan** — safer
-> than beeping as a blank badge. Fill in `config.json` and reboot.
+> badge shows a **"Configure me" screen with a QR code** of its setup-portal URL
+> and **does not advertise or scan** — safer than beeping as a blank badge. Scan
+> the QR (or type the URL), fill in your name and group(s), and save: the badge
+> **switches to the nametag and goes on the air immediately** — no reboot needed.
 
 ## Controls
 
@@ -171,11 +175,27 @@ The group hash is a 16-bit convenience filter, **not** authentication — anyone
 can broadcast a matching payload. That's fine for "who from my groups is around?"
 at a camp.
 
+## Background beacon (visible even with the app closed)
+
+A small boot service (`beacon_service.py`, declared in the manifest, started by
+the OS at boot) keeps **advertising your beacon while the app is closed**, so
+friends' badges still spot you when you're in another app or on the launcher.
+Background is **advertise-only**: you don't get alerts, LEDs, or contact swaps
+until you open the app — but *they* see *you*.
+
+- The service stays completely off the radio while the app is open (the app owns
+  BLE exactly as before, including during contact swaps).
+- An unconfigured badge stays silent in the background too.
+- It activates on the **next reboot** after installing/updating the app.
+- If another app uses Bluetooth while Fri3d Friends is closed, the two may fight
+  over the radio; the beacon re-asserts itself within ~30 s.
+
 ## Project layout
 
 ```
 app/com.fri3dcamp.fri3dfriends/   → the app (deploy to /apps/…)
   MANIFEST.JSON, fri3d_friends.py, ble_proximity.py (proximity beacon),
+  beacon_service.py (background beacon boot service),
   contact_exchange.py (Y-button GATT swap), web_portal.py (PIN-gated setup portal),
   config.json, fri3dfriends.png (splash logo), icon_64x64.png (launcher icon),
   montserrat_name.ttf (42px name font)

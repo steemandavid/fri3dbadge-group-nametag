@@ -1,3 +1,92 @@
+# !Fri3d Friends — v0.7.2: first-time portal save now switches to the nametag live — 2026-07-15
+
+## Deploy/ops notes (learned 2026-07-15/16, all three badges on 0.7.2)
+- **USB copies wedge the CDC far more often since the background beacon (v0.7.0)**
+  keeps BLE advertising during transfers — the known "stressed mid-copy while BLE
+  runs" failure. An interrupted `mpremote fs cp` leaves a **truncated file on
+  flash**: always `fs sha256sum` after deploying, and re-copy until it matches.
+- **Proven deploy recipe for a badge running the beacon service:** back up
+  `config.json` on-badge → write a blank `{"name":"","groups":[]}` (the service
+  then holds the radio OFF — unconfigured badges stay silent; a plain
+  `BLE().active(False)` is NOT enough, the watchdog re-asserts within ~30 s) →
+  copy + checksum → restore config → reboot.
+- A hard-wedged CDC (raw REPL never engages, console silent) needs a physical
+  RESET or USB replug; `mpremote reset` can't reach it. The two 2024 badges look
+  identical — identify by unplug-watching `/dev/serial/by-id/`.
+- Debugging: `time.sleep()` inside one `mpremote exec` starves the whole OS
+  asyncio loop — sample app state in a separate exec.
+
+Field feedback: after first-time setup via the portal, the badge stayed on "Configure
+me" (v0.6.3 only started BLE + showed a "reopen app" banner, avoiding the known
+screen-rebuild crash). Now the swap happens **in place on the same live screen** —
+the safe middle path between "do nothing" and the crashing rebuild: the setup widgets
+(title, subtitle, QR tile) are **hidden, never deleted**, the nametag widgets (name,
+pills, friends line, battery, detail panel) are **created** next to them (creation is
+safe; deletion/`setContentView` re-entry are the crash classes), and the banner is
+re-raised to the top (`move_foreground`). `_build_idle` was split into
+`_build_setup` / `_build_nametag` + shared widgets (clock, portal footer, controls,
+banner) built exactly once. Verified on the 2026 badge by replaying the portal save:
+Configure-me → nametag with pills, BLE live, and an immediate "X, Y nearby" arrival
+banner from the other badges — no crash.
+
+---
+
+# !Fri3d Friends — v0.7.1: QR code + clearer text on the Configure-me screen — 2026-07-15
+
+The unconfigured screen now says **"open this app's setup portal"** (was "open the WiFi
+setup portal") and shows a **QR code of the portal URL** — scan it with a phone instead
+of typing the IP. The QR sits on a white 136 px tile (the margin doubles as the QR quiet
+zone; `lv.qrcode` is built into the OS's LVGL), appears once WiFi is up and hides when
+it drops, fed by the existing 2 s `_refresh_portal` throttle. Falls back to the text URL
+if `lv.qrcode` is missing. Verified on-device (2024 badge): QR visible and encoding the
+live portal URL. Debugging gotcha rediscovered: `time.sleep()` inside an `mpremote exec`
+blocks the OS's single asyncio loop, so the app under test gets zero CPU — sample state
+in a *separate* exec instead.
+
+---
+
+# !Fri3d Friends — v0.6.2–v0.7.0: splash-crash hotfix, portal-save feedback, background beacon — 2026-07-15
+
+Three releases in one session, all **verified on real hardware** (2×2024 + 1×2026 badge,
+deployed over `mpremote` by stable `/dev/serial/by-id` path, `config.json` preserved).
+**64 off-device tests green** (60 + 4 new for the beacon service).
+
+## v0.6.2 — hotfix: v0.6.1 crashed the OS + rebooted the badge on every app start
+The F-19 "cleanup" (`self._splash_scr.delete()` after `setContentView`) was a
+use-after-free: `setContentView` starts a **non-blocking 500 ms LVGL slide animation**
+(`lv.screen_load_anim(..., auto_del=False)`) and returns immediately, so deleting the
+outgoing splash screen right after leaves the animation timer pointing at freed memory
+→ hard crash + reboot on the next tick, on both badge generations. This is the same
+landmine DESIGN.md already documented for the config-reload path; v0.6.1 shipped
+unflashed. Reverted to the field-verified leak-the-splash behaviour with a loud
+warning comment. Verified: all 3 badges survive the splash→main transition.
+
+## v0.6.3 — portal save on an unconfigured badge looked dead
+Field bug: first-time setup via the portal saved fine but the badge stayed silently on
+"Configure me" — `_build_idle`'s unconfigured branch returned **before the banner
+widgets were built**, so the "Config saved ✓" feedback was a silent no-op, and BLE only
+ever started from `onResume`. Now: the banner exists on the Configure-me screen too;
+`_apply_reload` detects the unconfigured→configured transition, **starts BLE live**
+(the F-5 Y-gate reads `_unconfigured` live, so it would have opened onto a dead radio)
+and shows "Saved! Reopen app for nametag". Deliberately does **not** re-submit the
+screen: `mpos.ui.view.setContentView` always pushes the stack and re-fires this same
+Activity's onPause/onResume — a subtler cousin of the v0.6.2 crash. Verified end-to-end
+on the 2026 badge by replaying the exact portal save path.
+
+## v0.7.0 — background beacon: visible to friends with the app closed
+New `beacon_service.py`, a manifest-declared `boot_completed` service (OS support
+verified on both generations): while the app is **not** on the screen stack, it
+advertises the identical non-connectable proximity beacon (advertise-only — no alerts,
+no swaps in the background); while the app is open it never touches the radio, so all
+existing swap/suspend logic is untouched. No app-code changes needed — the app's
+`begin()` replaces the service's adv on open, and the service reclaims the radio ≤5 s
+after exit. Unconfigured badges stay silent in the background too. Re-asserts the adv
+every ~30 s (self-heals radio trampling); watchdog survives USB-console
+`KeyboardInterrupt`. Verified 2024↔2026 both directions incl. open/close handoffs.
+**Activates on the next reboot after install.**
+
+---
+
 # !Fri3d Friends — v0.6.1: Phase 5 code-review fixes (portal input, swap/teardown robustness) — 2026-07-15
 
 Applied **every finding** from the Phase 5 code review

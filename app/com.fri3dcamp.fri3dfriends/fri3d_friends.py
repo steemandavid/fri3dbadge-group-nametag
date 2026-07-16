@@ -239,6 +239,10 @@ class Fri3dFriends(Activity):
         self._portal_lbl = None
         self._portal_last = None
         self._portal_next_ms = 0
+        self._qr = None
+        self._qr_box = None
+        self._qr_last = None
+        self._setup_widgets = []
         self._reload_pending = False
         self._splash_scr = None
         self._splash_logo = None
@@ -638,35 +642,62 @@ class Fri3dFriends(Activity):
             self.setContentView(self._scr)
         except Exception:
             pass
-        # The splash is never shown again — free its widgets + the ~8.7 KB PNG
-        # buffer rather than retain them for the app's lifetime.
-        if self._splash_scr is not None:
-            try:
-                self._splash_scr.delete()
-            except Exception:
-                pass
-            self._splash_scr = None
-            self._splash_logo = None
+        # NOTE: do NOT call self._splash_scr.delete() here. Deleting a screen
+        # object hard-crashes + reboots the badge on this MicroPythonOS build
+        # (same landmine as the config-reload screen rebuild — see DESIGN.md
+        # "Config reload"); confirmed on-device on all three badges (2026-07-15).
+        # So the splash is intentionally leaked for the app's lifetime, same as
+        # the field-verified 0.6.0 behaviour — do not "clean this up" again
+        # without testing a screen .delete() on real hardware first.
 
     # ------------------------------------------------------------------ UI build
     def _build_idle(self, scr):
         scr.set_style_bg_color(_col(COL_BG), 0)
         scr.set_style_bg_opa(lv.OPA.COVER, 0)
-        cfg = self._config
 
+        # Widgets shared by both layouts, built exactly once. The banner is
+        # deliberately built LAST so it z-stacks above everything; if the
+        # nametag is built later (first-time configure), it is re-raised.
         if self._unconfigured:
-            self._label(scr, 0, 60, "Configure me", COL_HINT, font=lv.font_montserrat_24, center=True)
-            self._label(scr, 0, 100, "open the WiFi setup", COL_NONE, font=lv.font_montserrat_16, center=True)
-            self._label(scr, 0, 124, "portal (URL below)", COL_NONE, font=lv.font_montserrat_16, center=True)
-            self._label(scr, 0, 150, "set: name, groups", COL_NONE, font=lv.font_montserrat_14, center=True)
-            self._clock_lbl = self._label(scr, CLOCK_X, CLOCK_Y, "--:--", COL_BATT,
-                                          font=lv.font_montserrat_14)
-            self._portal_lbl = self._label(scr, 0, CONTROLS_TOP - 14, "", COL_BATT,
-                                           font=lv.font_montserrat_12, center=True)
-            self._controls_lbl = self._label(scr, 0, CONTROLS_TOP, self._controls_text(),
-                                             COL_NONE, font=lv.font_montserrat_12, center=True)
-            return
+            self._build_setup(scr)
+        else:
+            self._build_nametag(scr)
+        self._clock_lbl = self._label(scr, CLOCK_X, CLOCK_Y, "--:--", COL_BATT,
+                                      font=lv.font_montserrat_14)
+        self._portal_lbl = self._label(scr, 0, CONTROLS_TOP - 14, "", COL_BATT,
+                                       font=lv.font_montserrat_12, center=True)
+        self._controls_lbl = self._label(scr, 0, CONTROLS_TOP, self._controls_text(),
+                                         COL_NONE, font=lv.font_montserrat_12, center=True)
+        self._build_banner(scr)
 
+    def _build_setup(self, scr):
+        # First-run "Configure me" layout. Every widget is tracked in
+        # _setup_widgets so a portal save can HIDE (never delete — deleting
+        # live widgets/screens crashes this build) the lot and swap to the
+        # nametag in place.
+        self._setup_widgets = [
+            self._label(scr, 0, 6, "Configure me", COL_HINT, font=lv.font_montserrat_24, center=True),
+            self._label(scr, 0, 38, "open this app's setup portal", COL_NONE, font=lv.font_montserrat_16, center=True),
+        ]
+        # QR code of the portal URL, on a white tile (the margin doubles as
+        # the QR quiet zone). Hidden until WiFi is up; fed by _refresh_portal.
+        try:
+            box = self._rbox(scr, (W - 136) // 2, 60, 136, 136, 0xFFFFFF, radius=6)
+            qr = lv.qrcode(box)
+            qr.set_size(108)
+            qr.set_dark_color(_col(0x000000))
+            qr.set_light_color(_col(0xFFFFFF))
+            qr.center()
+            box.add_flag(lv.obj.FLAG.HIDDEN)
+            self._qr = qr
+            self._qr_box = box
+            self._setup_widgets.append(box)
+        except Exception:      # no lv.qrcode in this build: text URL still shows
+            self._qr = None
+            self._qr_box = None
+
+    def _build_nametag(self, scr):
+        cfg = self._config
         # Name: bundled 42px TrueType font (1.5× the built-in max), single line,
         # scrolls when too long. Fixed font, not transform-scaled (scaling a
         # scrolling label re-renders every frame and starves the CPU).
@@ -678,10 +709,6 @@ class Fri3dFriends(Activity):
             pass
 
         self._batt_lbl = self._label(scr, BATT_X, BATT_Y, "--%", COL_BATT, font=lv.font_montserrat_14)
-
-        # Live clock: top-left, same font/colour as the battery %.
-        self._clock_lbl = self._label(scr, CLOCK_X, CLOCK_Y, "--:--", COL_BATT,
-                                      font=lv.font_montserrat_14)
 
         # Group pills (full width, stacked) -> sets self._friends_top.
         self._place_pills(scr)
@@ -697,14 +724,6 @@ class Fri3dFriends(Activity):
             self._friends_lbl.set_long_mode(lv.label.LONG_MODE.WRAP)
         except Exception:
             pass
-
-        # Portal footer (URL, or a login-challenge PIN) directly above controls.
-        self._portal_lbl = self._label(scr, 0, CONTROLS_TOP - 14, "", COL_BATT,
-                                       font=lv.font_montserrat_12, center=True)
-
-        # Controls (dynamic B label).
-        self._controls_lbl = self._label(scr, 0, CONTROLS_TOP, self._controls_text(),
-                                         COL_NONE, font=lv.font_montserrat_12, center=True)
 
         # A-button detail panel (hidden by default).
         dpw = W - 48
@@ -724,6 +743,7 @@ class Fri3dFriends(Activity):
             self._make_detail_row(self._detail_panel, i, dpw)
         self._detail_panel.add_flag(lv.obj.FLAG.HIDDEN)
 
+    def _build_banner(self, scr):
         # Alert banner (hidden), on top.
         self._banner_bg = lv.obj(scr)
         self._banner_bg.remove_style_all()
@@ -1271,6 +1291,7 @@ class Fri3dFriends(Activity):
                 url = None
             txt = ("⚙ " + url) if url else "⚙ WiFi not connected"
             col = COL_BATT
+            self._update_qr(url)
         if txt != self._portal_last:
             try:
                 self._portal_lbl.set_text(txt)
@@ -1279,6 +1300,21 @@ class Fri3dFriends(Activity):
                 pass
             self._portal_last = txt
 
+    def _update_qr(self, url):
+        # Show/refresh the setup-portal QR on the unconfigured screen (the only
+        # screen that builds self._qr). Hidden while there's no URL (no WiFi).
+        if self._qr is None or self._qr_box is None or url == self._qr_last:
+            return
+        try:
+            if url:
+                self._qr.update(url, len(url))
+                self._qr_box.remove_flag(lv.obj.FLAG.HIDDEN)
+            else:
+                self._qr_box.add_flag(lv.obj.FLAG.HIDDEN)
+            self._qr_last = url
+        except Exception:
+            pass
+
     def _reload_config(self):
         # Called from the portal (same asyncio loop). Defer the actual apply to
         # the main loop so it never races the BLE tick / exchange window.
@@ -1286,15 +1322,22 @@ class Fri3dFriends(Activity):
 
     def _apply_reload(self):
         # Runs on the main loop after a portal save. Keep this SAFE: only reload
-        # the in-memory config and do in-place label updates. Do NOT rebuild the
-        # screen or restart BLE here — deleting the active screen (with its
-        # scrolling labels) and cycling NimBLE hard-crash + reboot the badge on
-        # this build, and the repeated allocation leaks memory. Name + contact +
-        # runtime settings apply live; group pills and the on-air beacon
-        # (name/groups) update on the next app start.
+        # the in-memory config and do in-place label updates. Do NOT rebuild or
+        # re-submit the screen here — deleting the active screen (with its
+        # scrolling labels) hard-crashes + reboots the badge on this build (see
+        # _enter_main), and calling setContentView() a second time re-fires this
+        # Activity's own onPause/onStart/onResume (mpos.ui.view.setContentView
+        # always pushes onto the global screen stack and cycles the lifecycle of
+        # whichever activity owns the new screen — even when that's `self`
+        # again), which would tear down and duplicate the very state we're in
+        # the middle of updating (portal, main-loop task, BLE). So name +
+        # contact + runtime settings apply live; group pills, the friends
+        # nametag layout and the on-air beacon (name/groups) update on the next
+        # app start.
         if self._exchanging:
             self._reload_pending = True
             return
+        was_unconfigured = self._unconfigured
         try:
             self._load_config()
         except Exception:
@@ -1309,4 +1352,45 @@ class Fri3dFriends(Activity):
                 self._controls_lbl.set_text(self._controls_text())
             except Exception:
                 pass
+        if was_unconfigured and not self._unconfigured:
+            # First-time setup just completed via the portal. Starting BLE is
+            # safe here (no screen involved) and is needed now, not just
+            # cosmetically: the Y-button gate (F-5) reads self._unconfigured
+            # live, so it would open immediately — without begin() here, Y
+            # would pass the gate but find no radio running.
+            try:
+                self._ble.begin(self._config["groups"], self._config["name"],
+                                self._config["rssi_floor"])
+            except Exception:
+                pass
+            self._swap_setup_for_nametag()
         self._show_banner("Config saved ✓")
+
+    def _swap_setup_for_nametag(self):
+        # In-place layout swap on the SAME live screen: hide the setup widgets
+        # (never delete — deleting live widgets/screens hard-crashes this
+        # build) and create the nametag widgets next to them. No
+        # setContentView either: re-submitting the screen pushes the OS stack
+        # and re-fires this Activity's own onPause/onResume mid-update.
+        for wdg in self._setup_widgets:
+            try:
+                wdg.add_flag(lv.obj.FLAG.HIDDEN)
+            except Exception:
+                pass
+        self._setup_widgets = []
+        self._qr = None          # box was hidden above; stop QR refreshes
+        self._qr_box = None
+        self._qr_last = None
+        try:
+            self._build_nametag(self._scr)
+        except Exception:
+            pass
+        # New widgets were created after the banner, so re-raise it above them.
+        if self._banner_bg is not None:
+            try:
+                self._banner_bg.move_foreground()
+            except Exception:
+                try:
+                    self._banner_bg.move_to_index(-1)
+                except Exception:
+                    pass

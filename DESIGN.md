@@ -399,10 +399,27 @@ the app's loop; no threads).
 - **Config reload:** `on_change` sets a flag consumed on the main loop
   (`_apply_reload`), which does a **safe in-place reload only** — reload config +
   `set_text` the name/controls + show a "Config saved ✓" banner. It deliberately
-  does **not** rebuild the screen or restart BLE: deleting the active screen (with
-  its scrolling labels) and cycling NimBLE hard-crash + reboot the badge on this
-  build (and leak memory). So name/contact/runtime settings apply live; group
-  pills and the on-air beacon update on the next app start.
+  does **not** rebuild or re-submit the screen: deleting the active screen (with
+  its scrolling labels) hard-crashes + reboots the badge on this build, and a
+  second `setContentView` re-fires this same Activity's onPause/onResume
+  mid-update. So name/contact/runtime settings apply live; group pill and on-air
+  beacon *changes* (while already configured) update on the next app start.
+- **First-time configure (v0.6.3 + v0.7.2):** when a portal save flips the badge
+  from unconfigured → configured, `_apply_reload` additionally **starts BLE
+  live** (the Y-gate reads `_unconfigured` live and would otherwise open onto a
+  dead radio) and calls `_swap_setup_for_nametag()`: the setup widgets (title,
+  subtitle, QR tile — tracked in `_setup_widgets`) are **hidden, never
+  deleted**, the nametag widgets are **created in place** on the same live
+  screen (`_build_idle` is split into `_build_setup` / `_build_nametag` +
+  shared clock/portal/controls/banner built once), and the banner is re-raised
+  via `move_foreground()`. Widget *creation* on a live screen is safe;
+  *deletion* and screen swaps are the crash classes. Verified on-device: the
+  badge switches Configure-me → nametag on save, no reboot, and immediately
+  alerts on nearby friends.
+- **Configure-me QR (v0.7.1):** the unconfigured screen shows an `lv.qrcode`
+  (built into the OS's LVGL) of the portal URL on a white 136 px tile (margin =
+  quiet zone), updated/hidden by `_refresh_portal`'s 2 s throttle as WiFi
+  comes and goes; degrades to the text URL if `lv.qrcode` is absent.
 - **Verification status:** ✅ confirmed end-to-end on-device — footer URL,
   PIN login, editing config, and saving all work from a browser. A field bug was
   fixed (changelog 2026-07-13): the old save-reload rebuilt the whole LVGL screen
@@ -426,3 +443,35 @@ Notifications-on-badge and a BLE phone-companion were considered and **dropped**
 (see the plan history): Android notification mirroring would force a native
 companion app, and BLE Web-Bluetooth config excludes iOS Safari — the always-on
 WiFi portal reaches every phone.
+
+## 12. Background beacon service (`beacon_service.py`, v0.7.0)
+
+Keeps the badge visible to friends' badges while the app is closed. A
+manifest-declared boot service (`"services"` → `boot_completed`; supported by
+the installed OS on both badge generations — verified via
+`AppManager.get_services_for_action`). **Advertise-only**: non-connectable adv
+of the exact same `build_payload` beacon; no scanning, alerts or swaps in the
+background.
+
+- **Radio ownership rule** (single `BLE()` stack / adv set): a slow watchdog
+  (5 s poll) checks whether the app's Activity is anywhere on
+  `mpos.ui.view.screen_stack` (membership, not top-only — the app pushes *two*
+  entries: splash + main). App on the stack → service never touches BLE (the
+  Activity's lifecycle owns begin/suspend/teardown, incl. the swap window).
+  App absent → service `active(True)` + advertises, re-asserting every ~30 s.
+- **Handoff needs no coordination calls**: the app's `begin()` replaces the
+  service's identical adv on open; the app's teardown `active(False)` is undone
+  by the next watchdog poll (≤5 s beacon gap) after exit.
+- **Unconfigured badge stays silent** in the background too
+  (`load_beacon_config` mirrors `_load_config`'s unconfigured rule).
+- **Watchdog survivability**: the loop catches `BaseException` (only
+  `CancelledError` passes) around body *and* sleep — a USB-console Ctrl-C is
+  delivered as `KeyboardInterrupt` to whatever coroutine is running and must
+  not kill the beacon permanently.
+- **Verified on-device (2026-07-15)**, 2024 ↔ 2026 both directions: beacon on
+  the air with the app never opened; app-open → app-owned beacon continues;
+  app-exit → service reclaims ≤ poll interval; adv killed externally →
+  self-heals within a refresh cycle. Known cosmetic quirk: dev-time REPL scans
+  on a badge can knock its adv off the air for ≤30 s (self-heals).
+- **Boot-only start**: the service activates on the next reboot after
+  install/update; an AppStore update does not hot-swap a running service.

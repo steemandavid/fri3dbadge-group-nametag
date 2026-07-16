@@ -4,7 +4,7 @@
   "short_description": "Animated nametag + BLE proximity finder + contact swap",
   "long_description": "Shows your name and your group(s), and quietly alerts you when someone sharing one of your groups comes within Bluetooth range. Nearby friends appear as cards with signal strength. Press Y to swap contact info with another badge nearby (they press Y too). Configure your name, groups and free-form contact fields over an on-badge WiFi web portal (PIN-protected). Generic: any group sets its own name(s) and member by editing config.json.",
   "fullname": "com.fri3dcamp.fri3dfriends",
-  "version": "0.6.1",
+  "version": "0.7.2",
   "category": "utilities",
   "activities": [
     {
@@ -12,6 +12,15 @@
       "classname": "Fri3dFriends",
       "intent_filters": [
         { "action": "main", "category": "launcher" }
+      ]
+    }
+  ],
+  "services": [
+    {
+      "entrypoint": "beacon_service.py",
+      "classname": "Fri3dBeaconService",
+      "intent_filters": [
+        { "action": "boot_completed" }
       ]
     }
   ]
