@@ -39,6 +39,12 @@ Deployed (sha-verified) and driven end-to-end from the dev host over BLE (`bleak
 - **setup window** on a configured badge opens, **suspends proximity, advertises,
   shows the overlay, and resumes proximity on close**; exchange service still
   registered (`svc_ready`) alongside setup.
+- **2026 board** re-verified end-to-end (configure → nametag → on air, no reboot).
+- **Merged registration proven on-device:** the exchange service (handles 16/18)
+  and the setup service (handles 21–32) both live in one `gatts` table and are
+  both `gatts_read`-able — registered together in a single call, exchange first.
+- **Two-badge Y-swap verified working** (owner test) — the shared single
+  registration does not disturb the contact exchange.
 - **Bug fixed — session went invisible after the first phone left:** NimBLE stops
   advertising on connect and doesn't auto-resume; the setup session now
   **re-advertises on disconnect** (verified: badge reappears after a client drops).
@@ -48,11 +54,10 @@ Deployed (sha-verified) and driven end-to-end from the dev host over BLE (`bleak
   handle (breaking teardown-on-pause + the LED/Y gates + the deferred proximity
   begin). Both wrappers now identity-guard (`asyncio.current_task()`) before clearing.
 
-Still to verify with **physical** badge access (both test badges are USB-CDC wedged
-after the session — the documented pre-existing hazard, irrelevant untethered):
-window-mode GATT via a real phone (host BlueZ served a stale cache), a two-badge
-Y-swap regression after a setup session, the 2026 board, and iPhone/Bluefy.
-Backups of both badges' original `config.json` were kept and can be restored on replug.
+Remaining to try with a real **phone** (not USB — `mpremote`'s raw-REPL entry
+conflicts with active BLE and wedges the USB-CDC, the documented pre-existing
+hazard, irrelevant untethered): window-mode GATT from a phone in the field, and
+iPhone/Bluefy. Both exercise the same setup service already proven above.
 
 ---
 
