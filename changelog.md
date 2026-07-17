@@ -103,10 +103,30 @@ Deployed (sha-verified) and driven end-to-end from the dev host over BLE (`bleak
   remaining time (`SetupService.window_secs_left()`) so it no longer falsely
   hits 0 during an active transfer.
 
-Remaining to try with a real **phone** (not USB — `mpremote`'s raw-REPL entry
-conflicts with active BLE and wedges the USB-CDC, the documented pre-existing
-hazard, irrelevant untethered): window-mode GATT from a phone in the field, and
-iPhone/Bluefy. Both exercise the same setup service already proven above.
+## Phone + fleet verification (2026-07-17)
+Real-phone testing over Web Bluetooth on the actual badges (the last untethered gap):
+- **Setup via QR → Web Bluetooth page worked**: badges configured live and switched
+  to the nametag. The `require name + ≥1 group` and idle-window fixes above came out
+  of this round (a name-only save silently stuck on the QR screen; a long contacts
+  transfer timed out mid-flight).
+- **Contacts retrieval over the phone surfaced the paging race** (corrupt JSON, fixed
+  above with IRQ-synchronous serving).
+- **Deploy: flashed all 3 Fri3d 2026 badges** (Espressif native-USB) to the current
+  code, sha-verified. Recipe: quiet the radio via serial **paste-mode** blank-config +
+  reset (paste is safe with BLE active; `mpremote` raw-REPL wedges), re-resolve the
+  port by `/dev/serial/by-id` after the native-USB re-enumeration, `mpremote fs cp` +
+  `sha256sum`, restore config, reset.
+- **Bug fixed — app crashed on start after a *partial* deploy.** One badge had only
+  `ble_setup.py` + `fri3d_friends.py` updated, leaving an **old `contact_exchange.py`
+  (24631 vs 27532 bytes)** lacking `attach_setup`/`ensure_radio` that the new app
+  calls → AttributeError on the setup path. Fix: always push the **full core set**
+  (`ble_setup`, `fri3d_friends`, `contact_exchange`, `ble_proximity`, `beacon_service`);
+  verify on-device by importing with the app dir on `sys.path` and checking the methods.
+- **Note:** the two CH340 (`1a86:55d4`) USB devices on the dev host are **not badges** —
+  they run `rdzTTGOsonde` (radiosonde trackers) and must never be flashed.
+- **Published artifact:** built `dist/com.fri3dcamp.fri3dfriends_0.8.0.mpk` (deterministic
+  ZIP, single top-level `fullname` folder, default `config.json`, no runtime junk) for
+  upload to BadgeHub (slug `com.fri3dcamp.fri3dfriends`, badge `mpos_api_0`).
 
 ---
 

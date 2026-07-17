@@ -412,7 +412,11 @@ from GitHub Pages, `docs/setup/index.html`) talks GATT straight to the badge —
 - **Contacts read (paging):** client writes offset `0xFFFF` → `CONTACTS` returns
   `{"len":N,"page":400}`; then offset 0,400,… → 400-byte slices of
   `contacts.json`. Client reassembles + `JSON.parse` + downloads. `contacts_response`
-  is pure + unit-tested.
+  is pure + unit-tested. The page is written into the read characteristic
+  **synchronously in the IRQ** (`_serve_contacts`, bytes cached per session): a
+  `writeValueWithResponse(offset)` resolves the instant NimBLE ACKs, so a fast
+  client (browser) reads before the asyncio loop would run — a queued update would
+  hand back the *previous* page and corrupt the reassembled JSON.
 - **Advertising (setup mode):** connectable, `adv_data` = flags + complete local
   name `Fri3d-XXXX` (`XXXX` = last 2 bytes of the BLE MAC, uppercase — stable per
   board); the 128-bit service UUID goes in `resp_data`. The page filters
