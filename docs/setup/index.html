@@ -155,12 +155,23 @@ const CTLOFF_CHR  = "6e400026-b5a3-f393-e0a9-e50e24dcca9e";
 
 const CONTACTS_HEADER_OFFSET = 0xFFFF;
 const CFG_CHUNK = 180;          // conservative payload/chunk (fits any negotiated MTU)
+const SETTLE_MS = 30;           // pause between a ctloff write and the contacts read:
+                                // the badge updates the read buffer in a scheduled BLE
+                                // IRQ that can land just AFTER the write is ACKed, so a
+                                // zero-gap read could grab the previous page.
+const GATT_RETRIES = 6;         // reconnect+resume attempts before giving up on a drop
+                                // (enough patience for a badge that's briefly out of
+                                // range / slow to re-advertise after a supervision drop)
 
 const $ = (id) => document.getElementById(id);
 const enc = new TextEncoder();
 const dec = new TextDecoder();
 
 let device = null, server = null, chars = {}, contactsBytes = null;
+let authedCode = null;          // cached 4-digit code, for silent re-auth on reconnect
+let recovering = false;         // true while withGatt is auto-reconnecting (suppresses
+                                // the onDisconnected UI teardown so a transient drop
+                                // doesn't kick the user back to the Connect panel)
 
 // --- badge id from ?badge= ---
 const params = new URLSearchParams(location.search);
@@ -191,6 +202,25 @@ function checkSupport() {
 }
 
 // --- connect / auth ---
+
+// Open the GATT server and (re)acquire every characteristic + the STATUS
+// subscription. Shared by the first connect() and by ensureConnected()'s
+// reconnect path, so a re-established link is wired up identically.
+async function acquireGatt() {
+  server = await device.gatt.connect();
+  const svc = await server.getPrimaryService(SETUP_SVC);
+  for (const [k, uuid] of Object.entries({
+    auth: AUTH_CHR, info: INFO_CHR, cfg: CFG_CHR,
+    status: STATUS_CHR, contacts: CONTACTS_CHR, ctloff: CTLOFF_CHR })) {
+    chars[k] = await svc.getCharacteristic(uuid);
+  }
+  // Subscribe to STATUS notifications (best-effort).
+  try {
+    await chars.status.startNotifications();
+    chars.status.addEventListener("characteristicvaluechanged", onStatusNotify);
+  } catch (e) { /* notify optional */ }
+}
+
 async function connect() {
   try {
     setStatus("Opening Bluetooth chooser…", "info");
@@ -200,18 +230,7 @@ async function connect() {
     });
     device.addEventListener("gattdisconnected", onDisconnected);
     setStatus("Connecting…", "info");
-    server = await device.gatt.connect();
-    const svc = await server.getPrimaryService(SETUP_SVC);
-    for (const [k, uuid] of Object.entries({
-      auth: AUTH_CHR, info: INFO_CHR, cfg: CFG_CHR,
-      status: STATUS_CHR, contacts: CONTACTS_CHR, ctloff: CTLOFF_CHR })) {
-      chars[k] = await svc.getCharacteristic(uuid);
-    }
-    // Subscribe to STATUS notifications (best-effort).
-    try {
-      await chars.status.startNotifications();
-      chars.status.addEventListener("characteristicvaluechanged", onStatusNotify);
-    } catch (e) { /* notify optional */ }
+    await acquireGatt();
     // Read pre-auth INFO to confirm we reached the right badge.
     const info = JSON.parse(dec.decode(await chars.info.readValue()));
     $("connect-panel").classList.add("hidden");
@@ -224,11 +243,63 @@ async function connect() {
 }
 
 function onDisconnected() {
+  // While withGatt() is auto-reconnecting, a drop is expected and handled there —
+  // don't tear the UI down (that would bounce the user back to Connect mid-read).
+  if (recovering) return;
   setStatus("Badge disconnected.", "bad");
   $("main").classList.add("hidden");
   $("auth-panel").classList.add("hidden");
   $("connect-panel").classList.remove("hidden");
   chars = {};
+  authedCode = null;           // next session re-auths from the code field
+}
+
+// True for the "GATT server disconnected" / NetworkError class of BLE errors —
+// the transient link drops that a reconnect can recover from.
+function isDisconnectError(e) {
+  const s = (e && (e.message || e.name || "")) + "";
+  return /disconnect|GATT Server|NetworkError|not connected/i.test(s);
+}
+
+// Ensure a live, authenticated link. If the badge dropped, reconnect and silently
+// re-auth with the cached code (the badge keeps the same code and stays
+// advertising after a non-save disconnect, so this just works).
+async function ensureConnected() {
+  if (device && device.gatt.connected && chars.ctloff) return;
+  await acquireGatt();
+  if (authedCode) {
+    await chars.auth.writeValueWithResponse(enc.encode(authedCode));
+    await sleep(150);
+    const info = JSON.parse(dec.decode(await chars.info.readValue()));
+    if (!info.authed) throw new Error("re-auth failed after reconnect");
+  }
+}
+
+// Run an async GATT operation with reconnect-and-retry. On a transient disconnect
+// it reconnects (+ re-auths) and re-runs `fn` from the start — every op here is
+// idempotent (a paged read re-reads from 0; a config re-send is reassembled
+// fresh), so a restart is always safe. Non-disconnect errors propagate at once.
+async function withGatt(label, fn) {
+  recovering = true;
+  try {
+    let lastErr;
+    for (let i = 0; i < GATT_RETRIES; i++) {
+      try {
+        await ensureConnected();
+        return await fn();
+      } catch (e) {
+        lastErr = e;
+        if (!isDisconnectError(e) || i === GATT_RETRIES - 1) throw e;
+        setStatus(label + ": link dropped — reconnecting (" + (i + 1) + "/" + (GATT_RETRIES - 1) + ")…", "info");
+        chars = {};                       // force a fresh acquire next round
+        await sleep(Math.min(500 * (i + 1), 2500));   // growing backoff: give the badge
+                                          // time to re-advertise / come back in range
+      }
+    }
+    throw lastErr;
+  } finally {
+    recovering = false;
+  }
 }
 
 function onStatusNotify(ev) {
@@ -257,6 +328,7 @@ async function auth() {
     await sleep(150);
     const info = JSON.parse(dec.decode(await chars.info.readValue()));
     if (!info.authed) { setStatus("Wrong code, try again.", "bad"); return; }
+    authedCode = code;         // cache for silent re-auth after a transient drop
     fillForm(info);
     $("auth-panel").classList.add("hidden");
     $("main").classList.remove("hidden");
@@ -324,12 +396,16 @@ async function save() {
     const total = Math.max(1, Math.ceil(payload.length / CFG_CHUNK));
     if (total > 255) { setStatus("Config too large.", "bad"); return; }
     setStatus("Saving…", "info");
-    for (let seq = 0; seq < total; seq++) {
-      const part = payload.slice(seq * CFG_CHUNK, (seq + 1) * CFG_CHUNK);
-      const frame = new Uint8Array(2 + part.length);
-      frame[0] = seq; frame[1] = total; frame.set(part, 2);
-      await chars.cfg.writeValueWithResponse(frame);
-    }
+    // Send every chunk under reconnect-and-retry. The badge's ChunkAssembler
+    // resets on a fresh stream, so re-sending from seq 0 after a drop is safe.
+    await withGatt("Save", async () => {
+      for (let seq = 0; seq < total; seq++) {
+        const part = payload.slice(seq * CFG_CHUNK, (seq + 1) * CFG_CHUNK);
+        const frame = new Uint8Array(2 + part.length);
+        frame[0] = seq; frame[1] = total; frame.set(part, 2);
+        await chars.cfg.writeValueWithResponse(frame);
+      }
+    });
     // The badge notifies STATUS; also poll it as a fallback for browsers that
     // drop the notification.
     await sleep(250);
@@ -342,23 +418,31 @@ async function save() {
 // --- contacts (paged read) ---
 function u16le(n) { return new Uint8Array([n & 0xFF, (n >> 8) & 0xFF]); }
 
+// Read one page: write the offset, let the badge settle, then read the buffer.
+async function readPage(offset) {
+  await chars.ctloff.writeValueWithResponse(u16le(offset));
+  await sleep(SETTLE_MS);
+  return new Uint8Array((await chars.contacts.readValue()).buffer);
+}
+
 async function loadContacts() {
   try {
     setStatus("Reading contacts…", "info");
-    await chars.ctloff.writeValueWithResponse(u16le(CONTACTS_HEADER_OFFSET));
-    const hdr = JSON.parse(dec.decode(await chars.contacts.readValue()));
-    const total = hdr.len | 0, page = hdr.page || 400;
-    const buf = new Uint8Array(total);
-    let off = 0;
-    while (off < total) {
-      await chars.ctloff.writeValueWithResponse(u16le(off));
-      const slice = new Uint8Array(await chars.contacts.readValue().then(v => v.buffer));
-      if (!slice.length) break;
-      buf.set(slice.slice(0, Math.min(slice.length, total - off)), off);
-      off += slice.length;
-    }
-    contactsBytes = buf;
-    const list = JSON.parse(dec.decode(buf) || "[]");
+    const list = await withGatt("Contacts read", async () => {
+      const hdr = JSON.parse(dec.decode(await readPage(CONTACTS_HEADER_OFFSET)));
+      const total = hdr.len | 0, page = hdr.page || 400;
+      const buf = new Uint8Array(total);
+      let off = 0;
+      while (off < total) {
+        const slice = await readPage(off);
+        if (!slice.length) break;
+        const n = Math.min(slice.length, total - off);
+        buf.set(slice.slice(0, n), off);
+        off += n;
+      }
+      contactsBytes = buf;
+      return JSON.parse(dec.decode(buf) || "[]");
+    });
     renderContacts(list);
     setStatus("Loaded " + list.length + " contact(s).", "ok");
   } catch (e) {
