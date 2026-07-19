@@ -54,7 +54,9 @@ MAX_FAILS = 5                   # wrong codes before a lockout
 LOCKOUT_MS = 60000             # lockout duration (also rotates the code)
 
 MAX_CFG_BYTES = 2048           # cap on a reassembled config payload
-CONTACTS_PAGE = 400            # bytes per contacts read page
+CONTACTS_PAGE = 490            # bytes per contacts read page (fits one ATT read at
+                               # the negotiated MTU 515; fewer round-trips = fewer
+                               # chances for the link to drop mid-transfer)
 CONTACTS_HEADER_OFFSET = 0xFFFF  # client writes this offset to fetch the page header
 
 # After a save, KEEP the session alive (so the phone can reload contacts / make
@@ -711,6 +713,12 @@ class SetupService:
             return
         if self._auth.check(attempt):
             self._authed = True
+            # Snapshot contacts.json HERE (loop context), not in the IRQ. The blob
+            # is static for a whole setup session (a Y-swap can't run while setup
+            # owns the radio), so this one read serves every page — and the BLE IRQ
+            # (_serve_contacts) never touches flash, which would stall the main task
+            # and can starve/drop the GATT link.
+            self._contacts_cache = self._load_contacts_bytes()
             self._write_info(True)
             self._notify_status(ST_AUTH_OK)
         else:
@@ -755,9 +763,11 @@ class SetupService:
     def _serve_contacts(self, val):
         """Write the requested contacts page into the read characteristic. Called
         SYNCHRONOUSLY from the IRQ so the buffer is fresh before the phone reads
-        (see the ctloff branch in _irq). The header-offset request (start of a
-        paging session) refreshes the cache; page requests slice the cache so no
-        per-page file I/O happens in the IRQ."""
+        (see the ctloff branch in _irq). Slices an IN-MEMORY snapshot only — NO
+        flash I/O here. The snapshot is taken once on the loop at auth time
+        (_handle_auth); contacts.json can't change during a session, so it stays
+        valid for every page. Reading the file in the IRQ instead would stall the
+        main task and can starve the GATT link (the drop this method now avoids)."""
         if not self._authed:
             return
         if len(val) >= 2:
@@ -766,9 +776,10 @@ class SetupService:
             offset = val[0]
         else:
             offset = 0
-        if offset == CONTACTS_HEADER_OFFSET or self._contacts_cache is None:
-            self._contacts_cache = self._load_contacts_bytes()
-        page = contacts_response(self._contacts_cache, offset)
+        cache = self._contacts_cache
+        if cache is None:                # not primed yet (shouldn't happen post-auth)
+            cache = b"[]"
+        page = contacts_response(cache, offset)
         try:
             self._ble.gatts_write(self._h["contacts"], page)
         except Exception:

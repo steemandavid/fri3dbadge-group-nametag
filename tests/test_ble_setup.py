@@ -253,6 +253,99 @@ def test_window_secs_left_resets_on_activity(monkeypatch):
     assert svc.window_secs_left() == 0             # clamps at 0, never negative
 
 
+class _FakeBLE:
+    """Minimal gatts sink so SetupService's write paths run off-device."""
+    def __init__(self):
+        self.writes = []      # (handle, bytes)
+        self.notifies = []
+    def gatts_write(self, h, d, *a):
+        self.writes.append((h, bytes(d)))
+    def gatts_notify(self, c, h, d):
+        self.notifies.append((h, bytes(d)))
+    def gatts_set_buffer(self, *a):
+        pass
+
+    def last_write(self, handle):
+        for h, d in reversed(self.writes):
+            if h == handle:
+                return d
+        return None
+
+
+def _authed_service():
+    """A SetupService wired to a fake radio, with a counted contacts loader and a
+    deterministic auth code ('1000'). Returns (svc, fake_ble, load_calls)."""
+    svc = bs.SetupService(app_dir="/x", exchange=None)
+    fb = _FakeBLE()
+    svc._ble = fb
+    svc._h = {"auth": 1, "info": 2, "cfg": 3, "status": 4, "contacts": 5, "ctloff": 6}
+    svc._badge_id = "ABCD"
+    load_calls = {"n": 0}
+    blob = json.dumps([{"name": "friend %02d" % i, "fields": {"web": "x" * 20}}
+                       for i in range(20)]).encode("utf-8")   # multi-page (>490 B)
+    svc._contacts_blob = blob
+
+    def fake_load():
+        load_calls["n"] += 1
+        return blob
+    svc._load_contacts_bytes = fake_load
+    svc._auth = AuthState(rand=lambda n: 0)
+    svc._auth.new_code()                                       # -> "1000"
+    return svc, fb, load_calls
+
+
+def test_auth_snapshots_contacts_on_the_loop():
+    # Change B: a successful auth loads contacts.json ONCE, on the loop.
+    svc, fb, load_calls = _authed_service()
+    assert len(svc._contacts_blob) > CONTACTS_PAGE             # exercises paging
+    svc._handle_auth(b"1000")
+    assert svc._authed is True
+    assert load_calls["n"] == 1
+    assert svc._contacts_cache == svc._contacts_blob
+
+
+def test_serve_contacts_never_touches_flash_and_slices_cache():
+    # Change B: every page is sliced from the auth-time snapshot; the IRQ path
+    # (_serve_contacts) does NO further file I/O, whatever offset is requested.
+    svc, fb, load_calls = _authed_service()
+    svc._handle_auth(b"1000")
+    assert load_calls["n"] == 1
+    blob = svc._contacts_blob
+
+    def off_bytes(o):
+        return bytes([o & 0xFF, (o >> 8) & 0xFF])
+
+    # header request
+    svc._serve_contacts(off_bytes(CONTACTS_HEADER_OFFSET))
+    assert fb.last_write(5) == contacts_response(blob, CONTACTS_HEADER_OFFSET)
+    # every page, including one past the first page boundary
+    for off in (0, CONTACTS_PAGE, 2 * CONTACTS_PAGE, len(blob)):
+        svc._serve_contacts(off_bytes(off))
+        assert fb.last_write(5) == contacts_response(blob, off)
+    # …and not one extra flash read happened in the IRQ across all of that.
+    assert load_calls["n"] == 1
+
+    # Reassembling every page must reproduce the original blob exactly.
+    reassembled = b""
+    off = 0
+    while off < len(blob):
+        page = contacts_response(blob, off)
+        if not page:
+            break
+        reassembled += page
+        off += len(page)
+    assert reassembled == blob
+
+
+def test_serve_contacts_denied_before_auth():
+    # An unauthenticated central gets nothing (no page written, no flash read).
+    svc, fb, load_calls = _authed_service()
+    svc._authed = False
+    svc._serve_contacts(bytes([0, 0]))
+    assert fb.last_write(5) is None
+    assert load_calls["n"] == 0
+
+
 def test_build_setup_adv_layout():
     adv = build_setup_adv("ABCD")
     # Flags AD (len 2, type 0x01, 0x06) then name AD (type 0x09 "Fri3d-ABCD").
