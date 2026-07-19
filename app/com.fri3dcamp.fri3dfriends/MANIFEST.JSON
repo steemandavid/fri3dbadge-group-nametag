@@ -4,7 +4,7 @@
   "short_description": "Animated nametag + BLE proximity finder + contact swap",
   "long_description": "Shows your name and your group(s), and quietly alerts you when someone sharing one of your groups comes within Bluetooth range. Nearby friends appear as cards with signal strength. Press Y to swap contact info with another badge nearby (they press Y too). Configure your name, groups and free-form contact fields from your phone over Bluetooth: scan the badge's QR to open a web page (Web Bluetooth) that talks straight to the badge — no WiFi/network needed. A 4-digit code shown on the badge gates access. Generic: any group sets its own name(s) and member by editing config.json.",
   "fullname": "com.fri3dcamp.fri3dfriends",
-  "version": "0.8.0",
+  "version": "0.8.1",
   "category": "utilities",
   "activities": [
     {
