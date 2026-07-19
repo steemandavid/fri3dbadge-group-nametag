@@ -410,13 +410,25 @@ from GitHub Pages, `docs/setup/index.html`) talks GATT straight to the badge —
   atomic `config.json` write → fire the app's `_reload_config()` → `STATUS ok`
   + notify. Any failure → `invalid`/`too_large`/`auth_required`; state unchanged.
 - **Contacts read (paging):** client writes offset `0xFFFF` → `CONTACTS` returns
-  `{"len":N,"page":400}`; then offset 0,400,… → 400-byte slices of
-  `contacts.json`. Client reassembles + `JSON.parse` + downloads. `contacts_response`
-  is pure + unit-tested. The page is written into the read characteristic
-  **synchronously in the IRQ** (`_serve_contacts`, bytes cached per session): a
-  `writeValueWithResponse(offset)` resolves the instant NimBLE ACKs, so a fast
-  client (browser) reads before the asyncio loop would run — a queued update would
-  hand back the *previous* page and corrupt the reassembled JSON.
+  `{"len":N,"page":490}`; then offset 0,490,… → 490-byte slices of
+  `contacts.json` (490 fits one ATT read at the negotiated MTU 515, so fewer
+  round-trips = fewer chances to drop mid-transfer). Client reassembles +
+  `JSON.parse` + downloads. `contacts_response` is pure + unit-tested. The page is
+  written into the read characteristic **in the IRQ** (`_serve_contacts`), which
+  slices an **in-memory snapshot taken once on the loop at auth**
+  (`_handle_auth`) — NO flash I/O in the IRQ (a file read there stalls the main
+  task and can starve the GATT link). `contacts.json` can't change during a
+  session (a Y-swap can't run while setup owns the radio), so the snapshot serves
+  every page. The client adds a small settle before each read: a
+  `writeValueWithResponse(offset)` resolves the instant NimBLE ACKs, but the
+  buffer update runs in a *scheduled* IRQ that can land just after, so a zero-gap
+  read could grab the previous page.
+- **Dropped-link recovery (web page):** an occasional supervision-timeout drop
+  used to surface as `GATT server disconnected`. The badge keeps the session +
+  code alive and re-advertises after a non-save disconnect, so the page now
+  reconnects, silently re-auths with the cached code, and **resumes** the paged
+  read / config save (`withGatt`, up to 6 attempts with growing backoff) instead
+  of erroring. The read/save are idempotent, so a restart-from-zero is safe.
 - **Advertising (setup mode):** connectable, `adv_data` = flags + complete local
   name `Fri3d-XXXX` (`XXXX` = last 2 bytes of the BLE MAC, uppercase — stable per
   board); the 128-bit service UUID goes in `resp_data`. The page filters

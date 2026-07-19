@@ -1,3 +1,99 @@
+# !Fri3d Friends — v0.8.1: fix occasional GATT drops (reconnect/resume + no flash I/O in the BLE IRQ) — 2026-07-19
+
+Occasional **"GATT server disconnected"** while loading the stored friends list
+over the phone-setup page (and during first-time setup). Root-caused it as a
+fragile BLE session with **no recovery**, and shipped a layered fix. Also bumped
+to **0.8.1**, reflashed all three dev badges, deployed the web page to GitHub
+Pages, and built + staged the BadgeHub package.
+
+## Root cause
+
+The setup/contacts BLE session had zero timing margin and no self-healing: the
+badge advertises/accepts at the phone's default connection parameters (short
+supervision timeout, no peripheral param-update API in stock MicroPython), and a
+few things can stall the badge past that timeout. When a drop happened, nothing
+recovered — the paged read just threw. Contributing badge-side item: the contacts
+page was served by reading `contacts.json` **from flash inside the BLE IRQ**,
+which stalls the main task, and the "synchronous in the IRQ" serve was not
+actually synchronous with the write-ACK (scheduled IRQ) → a fast client could
+read a stale page.
+
+## The fix (A/B/C)
+
+| # | Change | Where |
+|---|--------|-------|
+| A | Phone reconnects + silently re-auths (cached code) + **resumes** the paged read / config save on a transient drop (`withGatt`, 6 attempts, growing backoff to 2.5 s); `onDisconnected` no longer tears down the UI mid-recovery | `docs/setup/index.html` |
+| B | Snapshot `contacts.json` **once at auth on the loop** (`_handle_auth`); the BLE IRQ (`_serve_contacts`) now only slices that in-memory blob — **zero flash I/O in the IRQ**. +30 ms settle before each page read closes the scheduled-IRQ race | `app/.../ble_setup.py`, `docs/setup/index.html` |
+| C | Contacts page **400 → 490** (fits one ATT read at MTU 515; fewer round-trips) | `app/.../ble_setup.py` |
+
+The read/save are idempotent, so a reconnect restart-from-zero is always safe.
+The new web page is **backward-compatible** — it uses whatever page size the badge
+advertises — so it fixes the visible error even against an un-flashed badge.
+
+## Commits (branch `feat/contact-swap-splash-portal`)
+
+- `443d306` Fix occasional GATT drops (A/B/C)
+- `f519e83` Bump version to 0.8.1 (`MANIFEST.JSON`)
+- `a0d228d` Web setup: more patient reconnect (4→6 attempts, backoff to 2.5 s)
+- `b55be5b` (on **`main`**) Deploy setup page to GitHub Pages (cherry-pick of the
+  page fixes only; Pages builds from `main`/`docs`)
+
+## Verification
+
+- **Off-device:** 83 unit tests pass, incl. 3 new asserting B — auth snapshots
+  contacts once, `_serve_contacts` does **zero** flash reads across every offset,
+  pre-auth is denied. `docs/setup/index.html` validated with `node --check`.
+- **On-device (live over BLE):** ran the real `SetupService` on a badge and drove
+  it with `bleak` — the GATT read returned `header {"page":490}`, confirming
+  **change C live** and that the auth→paging path (B) runs on hardware.
+- **Web deploy:** confirmed the live Pages page now serves change A (6 `withGatt`
+  matches after the ~45 s rebuild).
+- **Blocked:** the full multi-page + disconnect/resume live assertion — this
+  host's BlueZ can't sustain LE connects (see Notes).
+
+## Badge fleet (2026 dev badges)
+
+Reflashed all three with the full core set + `MANIFEST.JSON`, every file
+sha-verified against the repo, rebooted, all advertising `Fri3d-XXXX`:
+
+| Serial-id | Badge | Version |
+|-----------|-------|---------|
+| `348518acfab80000` | Fri3d-FABA | 0.8.1 |
+| `348518abdf0c0000` | Fri3d-DF0E | 0.8.1 |
+| `1cdbd49d9de40000` | Fri3d-9DE6 | 0.8.1 |
+
+Files: `ble_setup.py`, `fri3d_friends.py`, `contact_exchange.py`,
+`ble_proximity.py`, `beacon_service.py`, `MANIFEST.JSON`.
+
+## BadgeHub package
+
+- Built `dist/com.fri3dcamp.fri3dfriends_0.8.1.mpk` (deterministic recipe; icon +
+  0.8.1 manifest verified; core files sha-match the flashed badges).
+- Bumped `dist/metadata.json` 0.8.0 → 0.8.1 (`version` + `application[].executable`).
+- **Staged for publish** in `/storage/fileshare/com.fri3dcamp.fri3dfriends/`
+  (deleted stale leftovers first): the `.mpk`, `metadata.json`, `icon_64x64.png`
+  — cross-checked consistent. This staging is now a **standing task** on any
+  "publish to BadgeHub" request (see memory `badgehub-publish-fileshare`).
+
+## Notes / gotchas
+
+- **Publishing 0.8.1:** re-uploading the `.mpk` over the existing BadgeHub project
+  does NOT refresh metadata/icon — **delete + recreate** the project from the
+  fresh `.mpk` (or manually re-upload icon + corrected `metadata.json`).
+- **David2024 badge** (not connected here) still runs old `ble_setup.py`; change A
+  (now live) stops the visible error against it, but reflashing gets the drop
+  reduction (B/C).
+- **Host BLE limitation:** bleak scans fine but *connecting* fails deterministically
+  (`device not found` / connect-timeout); `bluetoothctl` fails the same → a BlueZ
+  policy on this host, not the badge/code (one early connect succeeded and returned
+  `page:490`). USB-reset of the BT dongle + `systemctl restart bluetooth` didn't
+  help; likely needs a host reboot / `main.conf` change.
+- **USB-CDC wedge:** cycling the harness while BLE is up wedges the badge CDC;
+  recover host-side with `USBDEVFS_RESET` (ioctl `0x5514`, needs sudo). Don't
+  over-reset — it can push a firmware-hung device into an enumeration fault that
+  needs a physical power-cycle. Prefer fire-and-forget launches (close serial
+  before the radio comes up). Captured in memory `badge-ble-testing`.
+
 # !Fri3d Friends — v0.8.0: phone setup over Bluetooth (Web Bluetooth); WiFi portal removed — 2026-07-16
 
 At Fri3d Camp badges and phones sit on **different SSIDs/subnets**, so the old
