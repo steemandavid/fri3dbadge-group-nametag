@@ -159,7 +159,9 @@ const SETTLE_MS = 30;           // pause between a ctloff write and the contacts
                                 // the badge updates the read buffer in a scheduled BLE
                                 // IRQ that can land just AFTER the write is ACKed, so a
                                 // zero-gap read could grab the previous page.
-const GATT_RETRIES = 4;         // reconnect+resume attempts before giving up on a drop
+const GATT_RETRIES = 6;         // reconnect+resume attempts before giving up on a drop
+                                // (enough patience for a badge that's briefly out of
+                                // range / slow to re-advertise after a supervision drop)
 
 const $ = (id) => document.getElementById(id);
 const enc = new TextEncoder();
@@ -290,7 +292,8 @@ async function withGatt(label, fn) {
         if (!isDisconnectError(e) || i === GATT_RETRIES - 1) throw e;
         setStatus(label + ": link dropped — reconnecting (" + (i + 1) + "/" + (GATT_RETRIES - 1) + ")…", "info");
         chars = {};                       // force a fresh acquire next round
-        await sleep(300 * (i + 1));        // brief backoff; badge re-advertises fast
+        await sleep(Math.min(500 * (i + 1), 2500));   // growing backoff: give the badge
+                                          // time to re-advertise / come back in range
       }
     }
     throw lastErr;
